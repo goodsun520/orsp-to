@@ -53,6 +53,18 @@ describe('book field normalization', () => {
     );
   });
 
+  it('recovers fully swapped cover and description values without inventing a URL', () => {
+    const result = normalizeBookFields(book({
+      intro: '/files/article/image/84/84324/84324s.jpg',
+      coverUrl: ' 真正的书籍简介 ',
+    }), baseUrl);
+
+    expect(result.intro).toBe('真正的书籍简介');
+    expect(result.coverUrl).toBe(
+      'http://www.dongtanxs.com/files/article/image/84/84324/84324s.jpg',
+    );
+  });
+
   it('returns an empty description when the upstream description is missing', () => {
     expect(normalizeBookFields(book({ intro: '   ' }), baseUrl).intro).toBe('');
   });

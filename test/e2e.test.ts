@@ -194,6 +194,7 @@ function misassignedCoverFixtureSource(bookSourceUrl: string): LegadoBookSource 
       ...source.ruleBookInfo,
       intro: undefined,
     },
+    exploreUrl: '推荐::/tag/search.html?key=遨游&page={{page}}',
   };
 }
 

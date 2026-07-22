@@ -85,7 +85,9 @@ export async function searchBooks(
   page: number,
   ctx?: RuleContext,
 ): Promise<SearchResultItem[]> {
-  if (canUseZhulangCodec(source)) return searchZhulangBooks(source, query, page);
+  if (canUseZhulangCodec(source)) {
+    return finalizeSearchItems(await searchZhulangBooks(source, query, page), baseUrlOf(source));
+  }
   const rule = source.ruleSearch;
   if (!rule?.bookList || !source.searchUrl) return [];
   if (page > 1 && !source.searchUrl.includes('{{page}}')) return [];
@@ -148,7 +150,7 @@ async function fetchBookList(
       kind: extractList($, scope, rule.kind),
       lastChapter: extractValue($, scope, rule.lastChapter),
       intro: extractValue($, scope, rule.intro),
-      coverUrl: absolutize(extractValue($, scope, rule.coverUrl), url),
+      coverUrl: extractValue($, scope, rule.coverUrl),
       bookUrl: absolutize(bookUrl, url),
     };
   }), url);
@@ -172,12 +174,7 @@ function fallbackBookTitle($: ReturnType<typeof parseHtml>, scope: Parameters<ty
 
 function finalizeSearchItems(items: SearchResultItem[], responseUrl: string): SearchResultItem[] {
   return items
-    .map((item) => ({
-      ...item,
-      title: item.title.trim(),
-      coverUrl: absolutize(item.coverUrl, responseUrl),
-      bookUrl: absolutize(item.bookUrl, responseUrl),
-    }))
+    .map((item) => normalizeBookFields(item, responseUrl))
     .filter((item) => item.title.length > 0 && isHttpUrl(item.bookUrl));
 }
 
@@ -191,37 +188,99 @@ function isHttpUrl(value: string): boolean {
 }
 
 export async function getBookInfo(source: LegadoBookSource, bookUrl: string, ctx?: RuleContext): Promise<BookInfo> {
-  if (canUseZhulangCodec(source)) return getZhulangBookInfo(source, bookUrl);
+  if (canUseZhulangCodec(source)) {
+    return normalizeBookFields(await getZhulangBookInfo(source, bookUrl), baseUrlOf(source));
+  }
   const rule = source.ruleBookInfo ?? {};
   const base = fetchOpts(source, ctx);
   const { url, html } = await fetchPage(bookUrl, base);
   const json = parseJsonResponse(html);
   if (json !== null) {
-    return {
+    return normalizeBookFields({
       title: extractJsonValue(json, rule.name),
       author: extractJsonValue(json, rule.author),
       kind: extractJsonList(json, rule.kind),
       wordCount: extractJsonValue(json, rule.wordCount),
       lastChapter: extractJsonValue(json, rule.lastChapter),
       intro: extractJsonValue(json, rule.intro),
-      coverUrl: absolutize(extractJsonValue(json, rule.coverUrl), url),
+      coverUrl: extractJsonValue(json, rule.coverUrl),
       bookUrl: url,
       tocUrl: absolutize(extractJsonUrl(json, rule.tocUrl), url),
-    };
+    }, url);
   }
   const $ = parseHtml(html);
   const scope = [$.root().get(0)!];
-  return {
+  return normalizeBookFields({
     title: extractValue($, scope, rule.name),
     author: extractValue($, scope, rule.author),
     kind: extractList($, scope, rule.kind),
     wordCount: extractValue($, scope, rule.wordCount),
     lastChapter: extractValue($, scope, rule.lastChapter),
     intro: extractValue($, scope, rule.intro),
-    coverUrl: absolutize(extractValue($, scope, rule.coverUrl), url),
+    coverUrl: extractValue($, scope, rule.coverUrl),
     bookUrl: url,
     tocUrl: absolutize(extractHtmlUrl($, scope, rule.tocUrl), url),
+  }, url);
+}
+
+/**
+ * Cleans the common book fields used by search, discovery, browse, and detail.
+ * Some imported sources accidentally put an `img@src` value in `intro` while
+ * leaving `coverUrl` empty. Recover that unambiguous image reference here so
+ * ORSP never exposes a cover path as a human-readable description.
+ */
+export function normalizeBookFields<T extends SearchResultItem>(item: T, responseUrl: string): T {
+  const intro = cleanText(item.intro);
+  const cover = cleanText(item.coverUrl);
+  const introIsImage = isImageReference(intro);
+  const coverIsUrl = isUrlReference(cover);
+  const coverCandidate = coverIsUrl ? cover : introIsImage ? intro : '';
+  const normalizedIntro = introIsImage ? (cover && !coverIsUrl ? cover : '') : intro;
+
+  return {
+    ...item,
+    title: cleanText(item.title),
+    author: cleanText(item.author),
+    kind: item.kind.map(cleanText).filter(Boolean),
+    lastChapter: cleanText(item.lastChapter),
+    intro: normalizedIntro,
+    coverUrl: resolveHttpUrl(coverCandidate, responseUrl),
+    bookUrl: absolutize(cleanText(item.bookUrl), responseUrl),
   };
+}
+
+function cleanText(value: string | null | undefined): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function resolveHttpUrl(value: string, baseUrl: string): string {
+  if (!value) return '';
+  try {
+    const url = new URL(value, baseUrl);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
+function isImageReference(value: string): boolean {
+  if (!value || /\s/.test(value)) return false;
+  try {
+    const url = new URL(value, 'https://image-reference.invalid/');
+    return /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isUrlReference(value: string): boolean {
+  if (!value || /\s/.test(value)) return false;
+  return /^(?:https?:)?\/\//i.test(value)
+    || value.startsWith('/')
+    || value.startsWith('./')
+    || value.startsWith('../')
+    || value.includes('/')
+    || isImageReference(value);
 }
 
 export async function getChapterList(source: LegadoBookSource, bookUrl: string, ctx?: RuleContext): Promise<TocChapter[]> {
