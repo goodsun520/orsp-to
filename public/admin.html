@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ORSP Adapter · 运维删除</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  input { padding: 0.5rem; border-radius: 6px; border: 1px solid #8886; font-family: inherit; }
+  button { padding: 0.5rem 1.1rem; border-radius: 6px; border: none; background: #2563eb; color: white; font-weight: 600; cursor: pointer; }
+  button.secondary { background: #6b7280; }
+  button.danger { background: #dc2626; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #8883; vertical-align: top; }
+  th { position: sticky; top: 0; background: canvas; }
+  .muted { color: #6b7280; font-size: 0.85rem; }
+  .ips { max-width: 280px; word-break: break-all; font-size: 0.78rem; }
+  #login-card { max-width: 360px; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+  <h1>运维删除</h1>
+  <p class="muted">成功正文读取和匿名聚合数据已在 <a href="/">首页公开排行榜</a> 展示。此页仅用于登录后删除垃圾源。</p>
+
+  <div id="login-card">
+    <label>管理密码</label><br>
+    <input id="password" type="password" style="width:100%; box-sizing:border-box;" />
+    <div style="margin-top:0.5rem;">
+      <button id="login-btn">登录</button>
+      <span id="login-status" class="muted"></span>
+    </div>
+  </div>
+
+  <div id="dashboard" style="display:none;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <span class="muted" id="summary"></span>
+      <button class="secondary" id="logout-btn">退出登录</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th><th>来源站点</th><th>正文读取</th><th>转换</th><th>顶</th>
+          <th>近期匿名读者</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+<script>
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function checkAuth() {
+  const res = await fetch('/api/admin/whoami');
+  const data = await res.json();
+  return data.authenticated;
+}
+
+async function loadDashboard() {
+  const res = await fetch('/api/admin/sources');
+  if (!res.ok) return;
+  const data = await res.json();
+  document.getElementById('summary').textContent = `共 ${data.items.length} 个源`;
+  const rows = document.getElementById('rows');
+  rows.innerHTML = '';
+  for (const item of data.items) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(item.name)}</td>
+      <td class="muted">${escapeHtml(item.websiteUrl)}</td>
+      <td>${item.readCount}</td>
+      <td>${item.convertRequests}</td>
+      <td>${item.votes}</td>
+      <td class="ips muted">${item.recentUniqueReaders}</td>
+      <td><button class="danger" data-delete="${escapeHtml(item.id)}">删除</button></td>
+    `;
+    rows.appendChild(tr);
+  }
+  rows.querySelectorAll('[data-delete]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('删除这个源？')) return;
+      await fetch(`/api/sources/${encodeURIComponent(btn.dataset.delete)}`, { method: 'DELETE' });
+      loadDashboard();
+    });
+  });
+}
+
+async function showDashboardIfAuthed() {
+  const authed = await checkAuth();
+  document.getElementById('login-card').style.display = authed ? 'none' : 'block';
+  document.getElementById('dashboard').style.display = authed ? 'block' : 'none';
+  if (authed) loadDashboard();
+}
+
+document.getElementById('login-btn').addEventListener('click', async () => {
+  const status = document.getElementById('login-status');
+  status.textContent = '登录中…';
+  const password = document.getElementById('password').value;
+  const res = await fetch('/api/admin/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) {
+    status.textContent = '密码错误或请求过于频繁';
+    return;
+  }
+  status.textContent = '';
+  showDashboardIfAuthed();
+});
+
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  await fetch('/api/admin/logout', { method: 'POST' });
+  showDashboardIfAuthed();
+});
+
+showDashboardIfAuthed();
+</script>
+</body>
+</html>

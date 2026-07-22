@@ -1,0 +1,42 @@
+{
+  "name": "orsp-converter",
+  "version": "0.4.2",
+  "type": "module",
+  "description": "Convert book-source JSON rules into live Open Reading Source Protocol (ORSP) endpoints.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miloquinn/orsp-converter.git"
+  },
+  "homepage": "https://book.openany.shop",
+  "bugs": {
+    "url": "https://github.com/miloquinn/orsp-converter/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "check": "npm run build && npm test && npm run check:deploy",
+    "check:deploy": "bash -n deploy/deploy.sh",
+    "audit:live": "node scripts/audit-live-sources.mjs",
+    "audit:mounted": "node scripts/audit-mounted-sources.mjs",
+    "stats:reset": "node scripts/reset-source-stats.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "express": "^4.19.2",
+    "iconv-lite": "^0.7.3",
+    "undici": "6.27.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

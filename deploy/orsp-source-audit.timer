@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the mounted source audit daily
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

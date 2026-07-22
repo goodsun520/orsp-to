@@ -1,0 +1,23 @@
+[Unit]
+Description=ORSP Converter
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/orsp-legado-adapter
+ExecStart=/opt/nodejs/bin/node dist/index.js
+Restart=on-failure
+RestartSec=2
+Environment=PORT=8790
+Environment=PUBLIC_ORIGIN=https://book.openany.shop
+Environment=DATA_DIR=/opt/orsp-legado-adapter/data/sources
+# ADMIN_PASSWORD lives only in secrets.env on the server, never in git.
+EnvironmentFile=-/opt/orsp-legado-adapter/secrets.env
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/orsp-legado-adapter/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

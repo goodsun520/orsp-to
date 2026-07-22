@@ -1,0 +1,39 @@
+node_modules/
+dist/
+coverage/
+.vitest/
+.playwright-cli/
+output/
+
+# Runtime state and logs
+data/
+*.log
+npm-debug.log*
+
+# Local environment and deployment configuration
+.env
+.env.*
+!.env.example
+.deploy.env
+.deploy.env.*
+!.deploy.env.example
+secrets.env
+
+# Keys and certificates
+keys/
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Local-only ops notes (server IP, key paths) — never commit
+*.local.md
+docs/*.local.md
+DEPLOY.local.md
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

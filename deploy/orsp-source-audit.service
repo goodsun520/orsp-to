@@ -1,0 +1,19 @@
+[Unit]
+Description=Audit mounted ORSP Converter sources
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/orsp-legado-adapter
+Environment=DATA_DIR=/opt/orsp-legado-adapter/data/sources
+Environment=AUDIT_REPORT_PATH=/opt/orsp-legado-adapter/data/audits/latest.json
+EnvironmentFile=-/opt/orsp-legado-adapter/secrets.env
+ExecStart=/opt/nodejs/bin/node scripts/audit-mounted-sources.mjs
+TimeoutStartSec=15min
+Nice=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/orsp-legado-adapter/data
+PrivateTmp=true

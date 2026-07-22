@@ -1,0 +1,1000 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ORSP 转换器｜将书源转换为 ORSP 格式</title>
+<meta name="description" content="将书源 JSON 转换为可直接使用的 ORSP 地址，并查看已验证书源的公开状态。" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23a8f0b3'/%3E%3Cpath d='M18 17h17c8 0 13 5 13 15S43 47 35 47H18V17Zm10 8v14h6c4 0 6-2 6-7s-2-7-6-7h-6Z' fill='%23102114'/%3E%3C/svg%3E" />
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e0c;
+    --surface: #121713;
+    --surface-raised: #171e19;
+    --surface-soft: #1d251f;
+    --border: #2a352d;
+    --border-strong: #3d4d41;
+    --text: #f2f7f3;
+    --muted: #9ba9a0;
+    --accent: #a8f0b3;
+    --accent-strong: #7edc8d;
+    --accent-ink: #102114;
+    --warn: #e3bf79;
+    --err: #ff958f;
+    --chip: #202922;
+    --shadow: 0 24px 70px rgba(0, 0, 0, 0.3);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100dvh;
+    font-family: "Avenir Next", "PingFang SC", "Noto Sans SC", sans-serif;
+    line-height: 1.6;
+    background: var(--bg);
+    color: var(--text);
+    background-image:
+      radial-gradient(circle at 85% 0%, rgba(126, 220, 141, 0.13), transparent 28rem),
+      radial-gradient(circle at 10% 35%, rgba(168, 240, 179, 0.06), transparent 24rem),
+      linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+    background-size: auto, auto, 44px 44px, 44px 44px;
+  }
+  button, input, textarea { font: inherit; }
+  a { color: inherit; }
+  .skip-link {
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 10;
+    padding: 0.55rem 0.8rem;
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-radius: 8px;
+    transform: translateY(-160%);
+    transition: transform 180ms ease;
+  }
+  .skip-link:focus { transform: translateY(0); }
+  .page-shell {
+    width: min(1180px, calc(100% - 2rem));
+    margin: 0 auto;
+    padding: 1.25rem 0 3.5rem;
+  }
+  .site-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 3.5rem;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.8rem;
+    text-decoration: none;
+  }
+  .brand-mark {
+    display: grid;
+    place-items: center;
+    width: 2.7rem;
+    aspect-ratio: 1;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px 16px 10px 16px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font: 800 1.25rem/1 "DIN Alternate", "Avenir Next", sans-serif;
+    box-shadow: 0 10px 30px rgba(126, 220, 141, 0.16);
+  }
+  .brand-copy { display: grid; line-height: 1.2; }
+  .brand-copy strong { font-size: 0.98rem; letter-spacing: 0.02em; }
+  .repo-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 2.7rem;
+    padding: 0.45rem 0.8rem 0.45rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(18, 23, 19, 0.78);
+    text-decoration: none;
+    color: var(--muted);
+    transition: border-color 220ms ease, transform 220ms ease, background 220ms ease;
+  }
+  .repo-pill strong {
+    padding: 0.28rem 0.55rem;
+    border-radius: 999px;
+    background: var(--surface-soft);
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .repo-pill:hover { transform: translateY(-2px); border-color: var(--accent-strong); background: var(--surface); }
+  .repo-pill:active { transform: translateY(0); }
+  .repo-pill:focus-visible, a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+    outline: 3px solid rgba(168, 240, 179, 0.4);
+    outline-offset: 3px;
+  }
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.75fr);
+    gap: clamp(2rem, 7vw, 6.5rem);
+    align-items: center;
+    margin-bottom: 2.2rem;
+  }
+  h1 {
+    max-width: 780px;
+    margin: 0;
+    font-size: clamp(2.5rem, 5vw, 4.5rem);
+    line-height: 1.02;
+    letter-spacing: -0.055em;
+    text-wrap: balance;
+  }
+  h2 { margin: 0; font-size: clamp(1.15rem, 1.8vw, 1.5rem); letter-spacing: -0.025em; }
+  .lead {
+    max-width: 610px;
+    margin: 1.1rem 0 0;
+    color: var(--muted);
+    font-size: 1rem;
+    text-wrap: pretty;
+  }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.3rem; }
+  .button-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.85rem;
+    padding: 0.65rem 1rem;
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    text-decoration: none;
+    font-weight: 700;
+    transition: transform 200ms ease, border-color 200ms ease, background 200ms ease;
+  }
+  .button-link.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+  .button-link:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .button-link:active { transform: translateY(0); }
+  .repo-card {
+    position: relative;
+    overflow: hidden;
+    padding: 1.4rem;
+    border: 1px solid var(--border);
+    border-radius: 26px 12px 26px 12px;
+    background: linear-gradient(150deg, rgba(29, 37, 31, 0.96), rgba(18, 23, 19, 0.9));
+    box-shadow: var(--shadow);
+  }
+  .repo-card::after {
+    content: "★";
+    position: absolute;
+    right: -0.5rem;
+    bottom: -3.8rem;
+    color: rgba(168, 240, 179, 0.055);
+    font-size: 11rem;
+    line-height: 1;
+    transform: rotate(-10deg);
+    pointer-events: none;
+  }
+  .repo-card-label { color: var(--muted); font: 700 0.7rem/1.2 "DIN Alternate", monospace; letter-spacing: 0.14em; }
+  .repo-name { margin: 0.8rem 0 0.2rem; font-size: 1.15rem; font-weight: 700; }
+  .star-number {
+    display: block;
+    margin-top: 1.2rem;
+    color: var(--accent);
+    font: 800 clamp(2.7rem, 5vw, 4.4rem)/1 "DIN Alternate", "Avenir Next", sans-serif;
+    letter-spacing: -0.06em;
+    font-variant-numeric: tabular-nums;
+  }
+  .star-caption { color: var(--muted); font-size: 0.78rem; }
+  .repo-question { position: relative; z-index: 1; margin: 1.25rem 0 0; font-weight: 650; line-height: 1.45; }
+  .repo-card-link { position: relative; z-index: 1; display: inline-block; margin-top: 1rem; color: var(--accent); font-weight: 700; text-underline-offset: 0.25rem; }
+  .card {
+    background: rgba(18, 23, 19, 0.92);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: clamp(1.15rem, 2.5vw, 1.75rem);
+    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.15);
+  }
+  .section-description { margin: 0.45rem 0 1.25rem; color: var(--muted); font-size: 0.9rem; }
+  label { display: block; font-weight: 650; margin: 1rem 0 0.4rem; font-size: 0.88rem; }
+  input[type="text"], input[type="url"], textarea, select {
+    width: 100%;
+    padding: 0.72rem 0.85rem;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: #0e1210;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.95rem;
+    transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+  }
+  input::placeholder, textarea::placeholder { color: #657068; }
+  input:hover, textarea:hover { border-color: var(--border-strong); }
+  input:focus, textarea:focus { border-color: var(--accent-strong); background: #111713; }
+  input[type="file"] {
+    width: 100%;
+    padding: 0.7rem;
+    border: 1px dashed var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface-soft);
+    color: var(--muted);
+  }
+  input[type="file"]::file-selector-button {
+    margin-right: 0.8rem;
+    padding: 0.48rem 0.75rem;
+    border: 0;
+    border-radius: 7px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  textarea { min-height: 8.5rem; resize: vertical; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.82rem; }
+  button {
+    margin-top: 0.75rem;
+    min-height: 2.55rem;
+    padding: 0.55rem 1rem;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 700;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+  }
+  button:hover:not(:disabled) { transform: translateY(-1px); background: #bcf6c4; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button.secondary { background: var(--surface-soft); color: var(--text); border-color: var(--border); }
+  button.secondary:hover:not(:disabled), button.ghost:hover:not(:disabled) { background: #28332b; border-color: var(--border-strong); }
+  button.vote { background: #d7efad; }
+  button.ghost {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .metrics-card { margin-bottom: 1rem; padding: 0.7rem; }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+  }
+  .stat-box {
+    min-width: 0;
+    padding: 1rem 1.15rem;
+    border-right: 1px solid var(--border);
+  }
+  .stat-box:last-child { border-right: 0; }
+  .stat-box .n { font: 800 1.8rem/1 "DIN Alternate", "Avenir Next", sans-serif; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+  .stat-box .l { font-size: 0.75rem; color: var(--muted); margin-top: 0.1rem; }
+  .workspace-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+    gap: 1rem;
+    align-items: start;
+    margin-bottom: 1rem;
+  }
+  .notice-card {
+    position: sticky;
+    top: 1rem;
+    overflow: hidden;
+    background: #151b17;
+  }
+  .notice-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--accent-strong);
+  }
+  .notice-list { display: grid; gap: 1.1rem; margin: 1.2rem 0 0; padding: 0; list-style: none; }
+  .notice-list li { display: grid; grid-template-columns: 1.65rem minmax(0, 1fr); gap: 0.65rem; color: var(--muted); font-size: 0.88rem; }
+  .notice-index { color: var(--accent); font: 700 0.75rem/1.6 "DIN Alternate", monospace; }
+  .notice-list strong { color: var(--text); font-weight: 650; }
+  .notice-list a { color: var(--accent); text-underline-offset: 0.2rem; }
+  .legal-strip {
+    display: grid;
+    grid-template-columns: minmax(190px, 0.35fr) minmax(0, 1fr);
+    gap: clamp(1rem, 4vw, 3rem);
+    margin: 0 0 1rem;
+    padding: 1.15rem 0;
+    border-block: 1px solid var(--border);
+  }
+  .legal-eyebrow {
+    color: var(--warn);
+    font: 800 0.72rem/1.4 "DIN Alternate", monospace;
+    letter-spacing: 0.14em;
+  }
+  .legal-strip h2 { margin-top: 0.35rem; }
+  .legal-strip p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+  .legal-strip strong { color: var(--text); }
+  .legal-strip a { color: var(--accent); text-underline-offset: 0.2rem; }
+  .consent-state { flex-basis: 100%; margin-top: 0.2rem; }
+  .consent-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: rgba(5, 8, 6, 0.88);
+    backdrop-filter: blur(12px);
+  }
+  .consent-overlay[hidden] { display: none; }
+  .consent-dialog {
+    width: min(760px, 100%);
+    max-height: min(88dvh, 820px);
+    overflow: auto;
+    border: 1px solid var(--border-strong);
+    border-radius: 20px;
+    background: #101511;
+    box-shadow: 0 30px 100px rgba(0, 0, 0, 0.55);
+  }
+  .consent-header { padding: clamp(1.2rem, 3vw, 2rem); border-bottom: 1px solid var(--border); }
+  .consent-header h2 { margin-top: 0.35rem; font-size: clamp(1.55rem, 4vw, 2.35rem); }
+  .consent-header p { margin: 0.65rem 0 0; color: var(--muted); }
+  .consent-body { padding: clamp(1.2rem, 3vw, 2rem); }
+  .terms-sections { display: grid; gap: 1rem; margin: 0 0 1.3rem; }
+  .terms-section { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 0.7rem; }
+  .terms-section p { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.88rem; }
+  .terms-section a { color: var(--accent); text-underline-offset: 0.2rem; }
+  .terms-index { color: var(--accent); font: 800 0.75rem/1.7 "DIN Alternate", monospace; }
+  .consent-checks { display: grid; gap: 0.7rem; padding-top: 1.1rem; border-top: 1px solid var(--border); }
+  .consent-check {
+    display: grid;
+    grid-template-columns: 1.15rem minmax(0, 1fr);
+    gap: 0.65rem;
+    align-items: start;
+    margin: 0;
+    color: var(--text);
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  .consent-check input { width: 1rem; height: 1rem; margin: 0.27rem 0 0; accent-color: var(--accent-strong); }
+  .consent-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: 1.1rem; }
+  .consent-actions button { margin-top: 0; }
+  .consent-decline { color: var(--muted); font-size: 0.85rem; text-underline-offset: 0.2rem; }
+  .legal-link {
+    min-height: auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 0.2rem;
+  }
+  .legal-link:hover:not(:disabled) { transform: none; background: transparent; }
+  .toolbar {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .sort-tabs { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .sort-tabs button {
+    margin-top: 0;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.82rem;
+    background: var(--chip);
+    color: var(--text);
+  }
+  .sort-tabs button.active { background: var(--accent); color: var(--accent-ink); }
+  .source-item {
+    border-top: 1px solid var(--border);
+    padding: 1.15rem 0;
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+  .source-item:first-child { border-top: none; padding-top: 0.25rem; }
+  .rank {
+    color: var(--accent);
+    font: 800 0.8rem/1.6 "DIN Alternate", monospace;
+    width: 2.2rem;
+    flex-shrink: 0;
+    padding-top: 0.15rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .source-body { flex: 1; min-width: 0; }
+  .title-line { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: baseline; }
+  .title-line strong { font-size: 1rem; }
+  .discovery-url, code {
+    display: inline-block;
+    background: var(--chip);
+    padding: 0.2rem 0.45rem;
+    border-radius: 6px;
+    word-break: break-all;
+    font-size: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin: 0.35rem 0;
+  }
+  .meta { font-size: 0.82rem; color: var(--muted); }
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 0.12rem 0.4rem;
+    border-radius: 999px;
+    background: #92400e33;
+    color: var(--warn);
+    margin: 0.15rem 0.25rem 0.15rem 0;
+  }
+  .source-group {
+    font-size: 0.75rem;
+    background: var(--chip);
+    border-radius: 999px;
+    padding: 0.15rem 0.5rem;
+    color: var(--muted);
+  }
+  .err { color: var(--err); font-size: 0.88rem; }
+  .ok { color: var(--accent-strong); font-size: 0.88rem; }
+  .muted { color: var(--muted); font-size: 0.88rem; }
+  .empty { padding: 1rem 0; color: var(--muted); }
+  .search-box { max-width: 240px; margin-top: 0; }
+  .converted-results { margin-top: 0.7rem; }
+  .converted-item { margin: 0.45rem 0; padding: 0.65rem 0; border-top: 1px solid var(--border); }
+  .converted-item button { margin-top: 0.35rem; }
+  footer { display: flex; justify-content: space-between; gap: 1rem; margin-top: 1.5rem; padding: 0.75rem 0; font-size: 0.8rem; color: var(--muted); }
+  footer a { color: var(--accent); }
+  @media (max-width: 820px) {
+    .site-header { margin-bottom: 2.5rem; }
+    .hero, .workspace-grid { grid-template-columns: 1fr; }
+    .legal-strip { grid-template-columns: 1fr; gap: 0.7rem; }
+    .repo-card { max-width: 520px; }
+    .notice-card { position: relative; top: auto; }
+  }
+  @media (max-width: 620px) {
+    .page-shell { width: min(100% - 1rem, 1180px); padding-top: 0.75rem; }
+    .site-header { align-items: flex-start; }
+    .repo-pill > span { display: none; }
+    .repo-pill { padding-left: 0.55rem; }
+    h1 { font-size: clamp(2.45rem, 12vw, 3.5rem); }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .stat-box:nth-child(2) { border-right: 0; }
+    .stat-box:nth-child(-n + 2) { border-bottom: 1px solid var(--border); }
+    .toolbar { align-items: stretch; }
+    .toolbar .row { width: 100%; }
+    .search-box { max-width: none; }
+    footer { display: block; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+  }
+</style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="ORSP 转换器首页">
+        <span class="brand-mark">O</span>
+        <span class="brand-copy">
+          <strong>ORSP 转换器</strong>
+        </span>
+      </a>
+      <a class="repo-pill" href="https://github.com/miloquinn/open-reading" target="_blank" rel="noopener">
+        <span>miloquinn/open-reading</span>
+        <strong>★ <span id="github-stars-header">—</span></strong>
+      </a>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="hero-title">
+        <div>
+          <h1 id="hero-title">ORSP 转换器</h1>
+          <p class="lead">
+            上传、粘贴 JSON 或填写直链，将书源转换为 ORSP 格式。验证通过后即可复制地址使用。
+          </p>
+          <div class="hero-actions">
+            <a class="button-link primary" href="#converter">开始转换</a>
+            <a class="button-link" href="https://github.com/miloquinn/orsp-converter" target="_blank" rel="noopener">转换器源码 ↗</a>
+          </div>
+        </div>
+
+        <aside class="repo-card" aria-labelledby="repo-card-title">
+          <div class="repo-card-label">LIVE GITHUB STARS</div>
+          <div class="repo-name" id="repo-card-title">miloquinn/open-reading</div>
+          <strong class="star-number" id="github-stars" aria-live="polite">—</strong>
+          <div class="star-caption" id="github-star-status">正在读取 GitHub Star…</div>
+          <p class="repo-question">这么好的仓库不点 Star，你良心过得去吗？</p>
+          <a class="repo-card-link" href="https://github.com/miloquinn/open-reading" target="_blank" rel="noopener">去 GitHub 点个 Star ↗</a>
+        </aside>
+      </section>
+
+      <section class="legal-strip" aria-labelledby="legal-summary-title">
+        <div>
+          <div class="legal-eyebrow">IMPORTANT NOTICE</div>
+          <h2 id="legal-summary-title">仅提供格式转换</h2>
+        </div>
+        <p>
+          <strong>本项目不提供任何书籍内容，也不提供、销售或推荐任何书源。</strong>
+          工具只处理用户主动提交的第三方规则；页面中的公开记录不代表本项目已审核、授权或为其背书。
+          你必须确认自己有权访问目标站点和相关内容，测试后请尽快删除临时获取、缓存或导出的内容。
+        </p>
+      </section>
+
+      <section class="card metrics-card" id="summary-card" aria-label="公开数据概览">
+        <div class="stats-grid" id="global-stats">
+          <div class="stat-box"><div class="n" id="s-sources">—</div><div class="l">已验证可用书源</div></div>
+          <div class="stat-box"><div class="n" id="s-reads">—</div><div class="l">真实用户正文读取</div></div>
+          <div class="stat-box"><div class="n" id="s-readers">—</div><div class="l">近期匿名读者</div></div>
+          <div class="stat-box"><div class="n" id="s-votes">—</div><div class="l">总点赞</div></div>
+        </div>
+      </section>
+
+      <section class="workspace-grid" id="converter">
+        <article class="card">
+          <h2>转换书源</h2>
+          <p class="section-description">选择一种输入方式，转换后复制 ORSP 地址。</p>
+          <label for="file-input">上传 JSON 文件（单个对象或合集数组）</label>
+          <input id="file-input" type="file" accept="application/json,.json" disabled />
+
+          <label for="url-input">或者填写书源 JSON 直链</label>
+          <input id="url-input" type="url" placeholder="https://example.com/source.json" disabled />
+
+          <label for="paste-input">或者直接粘贴书源 JSON</label>
+          <textarea id="paste-input" placeholder='{"bookSourceName": "示例书源", "bookSourceUrl": "https://..."}' disabled></textarea>
+
+          <div class="row">
+            <button id="convert-btn" disabled>转换为 ORSP</button>
+            <span id="convert-status" class="muted" aria-live="polite"></span>
+            <span id="consent-state" class="muted consent-state">同意免责声明与使用条款后可使用转换功能。</span>
+          </div>
+          <div id="convert-result" aria-live="polite"></div>
+        </article>
+
+        <aside class="card notice-card" aria-labelledby="notice-title">
+          <h2 id="notice-title">使用说明</h2>
+          <ul class="notice-list">
+            <li><span class="notice-index">01</span><span><strong>本项目只是转换工具。</strong><br>不提供书籍、不提供书源，不代表任何内容已获得授权。</span></li>
+            <li><span class="notice-index">02</span><span><strong>仅处理你有权使用的资源。</strong><br>不得绕过付费、登录、验证码、访问控制或其他技术保护措施。</span></li>
+            <li><span class="notice-index">03</span><span><strong>测试内容请尽快删除。</strong><br>不得长期保存、公开传播、出售或用于侵犯第三方权益的用途。</span></li>
+            <li><span class="notice-index">04</span><span><strong>侵权或封禁申请。</strong><br>请联系相关书源根地址所指向的原站权利人，或通过 <a href="https://github.com/miloquinn/open-reading/issues/new?template=rights_report.yml" target="_blank" rel="noopener">open-reading 权利反馈 ↗</a>申请人工封禁。</span></li>
+          </ul>
+        </aside>
+      </section>
+
+      <section class="card" aria-labelledby="ranking-title">
+    <div class="toolbar">
+      <div>
+        <h2 id="ranking-title">书源排行</h2>
+      </div>
+      <div class="row">
+        <input id="filter-input" class="search-box" type="text" placeholder="筛选名称 / 域名…" />
+        <div class="sort-tabs" id="sort-tabs">
+          <button type="button" data-sort="usage" class="active">按真实阅读</button>
+          <button type="button" data-sort="votes">按点赞</button>
+          <button type="button" data-sort="converts">按转换次数</button>
+          <button type="button" data-sort="newest">最新</button>
+        </div>
+      </div>
+    </div>
+    <div id="source-list" class="muted">加载中…</div>
+      </section>
+    </main>
+
+    <footer>
+      <span>ORSP 转换器 · 仅限合法、获授权的格式转换用途</span>
+      <span>
+        <button class="legal-link" id="review-terms" type="button">免责声明与使用条款</button>
+        · <a href="https://github.com/miloquinn/open-reading/issues/new?template=rights_report.yml" target="_blank" rel="noopener">侵权/封禁反馈</a>
+        · <a href="https://github.com/miloquinn/orsp-converter" target="_blank" rel="noopener">转换器源码</a>
+        · <a href="https://github.com/miloquinn/open-reading-source-protocol" target="_blank" rel="noopener">ORSP 协议</a>
+      </span>
+    </footer>
+  </div>
+
+  <div class="consent-overlay" id="consent-overlay" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-description">
+    <section class="consent-dialog">
+      <header class="consent-header">
+        <div class="legal-eyebrow">TERMS · 2026-07-22</div>
+        <h2 id="consent-title" tabindex="-1">使用前请确认你的权利与责任</h2>
+        <p id="consent-description">继续使用即表示你理解本项目只做规则转换，并同意以下免责声明与使用条款。</p>
+      </header>
+      <div class="consent-body">
+        <div class="terms-sections">
+          <div class="terms-section"><span class="terms-index">01</span><div><strong>服务性质</strong><p>本项目不提供任何书籍内容，不提供、出售或推荐任何书源。它只把用户自行提交的第三方规则转换为 ORSP 格式；转换成功、公开展示或可访问均不构成权利审查、许可、认可或内容背书。</p></div></div>
+          <div class="terms-section"><span class="terms-index">02</span><div><strong>合法访问与授权</strong><p>你只能提交、转换和访问自己拥有合法权利、已获明确授权或依法可以访问的书源配置、目标网站和内容。禁止利用本工具绕过付费、登录、验证码、地域限制、访问控制、反爬措施或其他技术保护。</p></div></div>
+          <div class="terms-section"><span class="terms-index">03</span><div><strong>内容处理与尽快删除</strong><p>通过本工具临时获取、缓存或导出的第三方内容，应在完成个人测试后尽快删除。不得长期保存、复制、公开传播、出售、再许可，或用于任何侵犯著作权、隐私权、数据库权及其他合法权益的用途。</p></div></div>
+          <div class="terms-section"><span class="terms-index">04</span><div><strong>第三方内容与责任</strong><p>内容、书源规则及目标站点均由第三方控制，本项目不保证其合法性、准确性、持续可用性或安全性。因你的提交、访问、保存、传播或使用行为产生的责任由你自行承担；如对权利边界不确定，请停止使用并咨询专业人士。</p></div></div>
+          <div class="terms-section"><span class="terms-index">05</span><div><strong>侵权通知与人工封禁</strong><p>如发现疑似侵权，请优先联系相关书源根地址所指向的原站运营者或权利人；也可通过 <a href="https://github.com/miloquinn/open-reading/issues/new?template=rights_report.yml" target="_blank" rel="noopener">open-reading 权利反馈表</a>提交可核验信息，维护者可对相关书源进行人工封禁或下架。工具自身问题请提交至 <a href="https://github.com/miloquinn/orsp-converter/issues" target="_blank" rel="noopener">转换器仓库</a>。</p></div></div>
+        </div>
+
+        <div class="consent-checks">
+          <label class="consent-check" for="rights-confirmed">
+            <input id="rights-confirmed" type="checkbox" />
+            <span>我确认对将要提交的书源配置、目标网站及相关内容具有合法访问和使用权限，并且不会绕过任何访问控制或技术保护措施。</span>
+          </label>
+          <label class="consent-check" for="terms-confirmed">
+            <input id="terms-confirmed" type="checkbox" />
+            <span>我已阅读并同意本免责声明与使用条款，理解本项目不提供书籍或书源，并承诺在测试完成后尽快删除临时获取的内容。</span>
+          </label>
+        </div>
+
+        <div class="consent-actions">
+          <button id="accept-terms" type="button" disabled>同意并继续使用</button>
+          <a class="consent-decline" href="https://github.com/miloquinn/open-reading" rel="noopener">不同意，离开本站</a>
+        </div>
+      </div>
+    </section>
+  </div>
+
+<script>
+const VOTED_KEY = 'orsp_voted_ids';
+const TERMS_KEY = 'orsp_terms_acceptance';
+const TERMS_VERSION = '2026-07-22';
+let currentSort = 'usage';
+let cachedItems = [];
+let cachedSummary = null;
+let termsAccepted = false;
+let appStarted = false;
+
+function votedIds() {
+  try { return new Set(JSON.parse(localStorage.getItem(VOTED_KEY) || '[]')); } catch { return new Set(); }
+}
+function markVoted(id) {
+  const s = votedIds();
+  s.add(id);
+  localStorage.setItem(VOTED_KEY, JSON.stringify([...s]));
+}
+
+function hasCurrentTermsAcceptance() {
+  try {
+    const value = JSON.parse(localStorage.getItem(TERMS_KEY) || 'null');
+    return value?.version === TERMS_VERSION && value?.accepted === true && value?.rightsConfirmed === true;
+  } catch {
+    return false;
+  }
+}
+
+function setConverterEnabled(enabled) {
+  ['file-input', 'url-input', 'paste-input', 'convert-btn'].forEach((id) => {
+    document.getElementById(id).disabled = !enabled;
+  });
+  document.getElementById('consent-state').textContent = enabled
+    ? `已同意 ${TERMS_VERSION} 版条款，并确认拥有合法访问权限。`
+    : '同意免责声明与使用条款后可使用转换功能。';
+}
+
+function startApp() {
+  if (appStarted) return;
+  appStarted = true;
+  fetchGithubStars();
+  fetchSources();
+  setInterval(fetchSources, 30_000);
+  setInterval(fetchGithubStars, 5 * 60_000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') fetchGithubStars();
+  });
+}
+
+function openTerms() {
+  const overlay = document.getElementById('consent-overlay');
+  overlay.hidden = false;
+  document.querySelector('.page-shell').inert = true;
+  document.body.style.overflow = 'hidden';
+  if (termsAccepted) {
+    document.getElementById('rights-confirmed').checked = true;
+    document.getElementById('terms-confirmed').checked = true;
+    document.getElementById('accept-terms').disabled = false;
+  }
+  requestAnimationFrame(() => document.getElementById('consent-title').focus());
+}
+
+function closeTerms() {
+  if (!termsAccepted) return;
+  document.getElementById('consent-overlay').hidden = true;
+  document.querySelector('.page-shell').inert = false;
+  document.body.style.overflow = '';
+}
+
+function syncTermsButton() {
+  const rightsConfirmed = document.getElementById('rights-confirmed').checked;
+  const termsConfirmed = document.getElementById('terms-confirmed').checked;
+  document.getElementById('accept-terms').disabled = !(rightsConfirmed && termsConfirmed);
+}
+
+document.getElementById('rights-confirmed').addEventListener('change', syncTermsButton);
+document.getElementById('terms-confirmed').addEventListener('change', syncTermsButton);
+document.getElementById('review-terms').addEventListener('click', openTerms);
+document.getElementById('accept-terms').addEventListener('click', () => {
+  if (document.getElementById('accept-terms').disabled) return;
+  termsAccepted = true;
+  try {
+    localStorage.setItem(TERMS_KEY, JSON.stringify({
+      version: TERMS_VERSION,
+      accepted: true,
+      rightsConfirmed: true,
+      acceptedAt: new Date().toISOString(),
+    }));
+  } catch {
+    // Storage may be unavailable in private/restricted contexts; keep consent for this page session.
+  }
+  setConverterEnabled(true);
+  closeTerms();
+  startApp();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !document.getElementById('consent-overlay').hidden) {
+    event.preventDefault();
+    closeTerms();
+  }
+});
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('zh-CN', { hour12: false });
+  } catch { return iso; }
+}
+
+function warningLabel(unsupported) {
+  if (!unsupported) return [];
+  const labels = [];
+  if (unsupported.cookieMode === 'static') labels.push('静态 Cookie');
+  if (unsupported.cookieMode === 'http-session') labels.push('HTTP Cookie 会话');
+  if (unsupported.cookieMode === 'interactive-unsupported') labels.push('含交互登录流程');
+  if (unsupported.cookieMode === 'browser-unsupported') labels.push('含浏览器验证流程');
+  if (!unsupported.cookieMode && unsupported.cookieJar) labels.push('需要 Cookie');
+  if (unsupported.embeddedJs) labels.push('含内嵌 JS');
+  if (unsupported.humanVerification) labels.push('提示人机验证');
+  return labels;
+}
+
+function healthLabel(health) {
+  if (!health) return '完整链路验证：未验证';
+  const status = health.status === 'parse_passed' ? '通过' : '失败';
+  const checkedAt = formatTime(health.checkedAt);
+  return `完整链路验证：${status}${checkedAt ? `（${checkedAt}）` : ''}`;
+}
+
+function renderGlobal(summary) {
+  document.getElementById('s-sources').textContent = summary?.sourceCount ?? 0;
+  document.getElementById('s-reads').textContent = summary?.totalReads ?? 0;
+  document.getElementById('s-votes').textContent = summary?.totalVotes ?? 0;
+  document.getElementById('s-readers').textContent = summary?.recentUniqueReaders ?? 0;
+}
+
+async function fetchGithubStars() {
+  const starEl = document.getElementById('github-stars');
+  const headerEl = document.getElementById('github-stars-header');
+  const statusEl = document.getElementById('github-star-status');
+  try {
+    const res = await fetch('https://api.github.com/repos/miloquinn/open-reading', {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+    const data = await res.json();
+    if (!Number.isFinite(data.stargazers_count)) throw new Error('GitHub Star 数据无效');
+    const count = data.stargazers_count.toLocaleString('zh-CN');
+    starEl.textContent = count;
+    headerEl.textContent = count;
+    statusEl.textContent = 'GitHub 实时 Star';
+  } catch {
+    starEl.textContent = '去看看';
+    headerEl.textContent = 'Star';
+    statusEl.textContent = '暂时无法读取数量，点击可前往仓库';
+  }
+}
+
+function renderSources(items) {
+  const el = document.getElementById('source-list');
+  const q = (document.getElementById('filter-input').value || '').trim().toLowerCase();
+  const filtered = q
+    ? items.filter((it) =>
+        (it.name || '').toLowerCase().includes(q) ||
+        (it.websiteUrl || '').toLowerCase().includes(q) ||
+        (it.id || '').toLowerCase().includes(q))
+    : items;
+
+  if (!filtered.length) {
+    el.innerHTML = `<p class="empty">${items.length ? '没有匹配的书源。' : '还没有转换任何源。上传一个书源 JSON 开始吧。'}</p>`;
+    return;
+  }
+
+  const voted = votedIds();
+  el.innerHTML = '';
+  filtered.forEach((item, i) => {
+    const div = document.createElement('div');
+    div.className = 'source-item';
+    const warnings = warningLabel(item.unsupported);
+    const alreadyVoted = voted.has(item.id);
+    const rank = items.indexOf(item) + 1;
+    div.innerHTML = `
+      <div class="rank">#${rank}</div>
+      <div class="source-body">
+        <div class="title-line">
+          <strong>${escapeHtml(item.name)}</strong>
+          <span class="meta">${escapeHtml(item.websiteUrl)}</span>
+          ${item.group ? `<span class="source-group">${escapeHtml(item.group)}</span>` : ''}
+        </div>
+        <div class="discovery-url">${escapeHtml(item.discoveryUrl)}</div>
+        <div class="ok">${escapeHtml(healthLabel(item.health))}</div>
+        <div class="meta">
+          真实用户正文读取 <b>${item.readCount}</b>
+          · 近期匿名读者 <b>${item.recentUniqueReaders}</b>
+          · 转换请求 <b>${item.convertRequests}</b>
+          · 点赞 <b>${item.votes}</b>
+          · 收录 ${escapeHtml(formatTime(item.createdAt))}
+        </div>
+        ${warnings.map((w) => `<span class="tag">${w}</span>`).join('')}
+        <div class="row">
+          <button class="secondary" data-copy="${escapeHtml(item.discoveryUrl)}">复制 ORSP 地址</button>
+          <button class="ghost" data-copy-base="${escapeHtml(item.orspBaseUrl || '')}">复制根地址</button>
+          <button class="vote" data-vote="${escapeHtml(item.id)}" ${alreadyVoted ? 'disabled' : ''}>
+            ${alreadyVoted ? '已赞' : '顶一下'}
+          </button>
+        </div>
+      </div>
+    `;
+    el.appendChild(div);
+  });
+
+  el.querySelectorAll('[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(btn.dataset.copy);
+      const old = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    });
+  });
+  el.querySelectorAll('[data-copy-base]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(btn.dataset.copyBase);
+      const old = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    });
+  });
+  el.querySelectorAll('[data-vote]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.vote;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/sources/${encodeURIComponent(id)}/vote`, { method: 'POST' });
+        if (res.ok) {
+          markVoted(id);
+          btn.textContent = '已赞';
+          fetchSources();
+        } else {
+          btn.disabled = false;
+        }
+      } catch {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+async function fetchSources() {
+  const res = await fetch(`/api/sources?sort=${encodeURIComponent(currentSort)}`);
+  const data = await res.json();
+  cachedItems = data.items || [];
+  cachedSummary = data.summary || null;
+  renderGlobal(cachedSummary);
+  renderSources(cachedItems);
+}
+
+document.getElementById('sort-tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-sort]');
+  if (!btn) return;
+  currentSort = btn.dataset.sort;
+  document.querySelectorAll('#sort-tabs button').forEach((b) => b.classList.toggle('active', b === btn));
+  fetchSources();
+});
+
+document.getElementById('filter-input').addEventListener('input', () => {
+  renderSources(cachedItems);
+});
+
+async function readFileAsJson(file) {
+  const text = await file.text();
+  return JSON.parse(text);
+}
+
+document.getElementById('convert-btn').addEventListener('click', async () => {
+  const status = document.getElementById('convert-status');
+  const resultEl = document.getElementById('convert-result');
+  const fileInput = document.getElementById('file-input');
+  const urlInput = document.getElementById('url-input');
+  const pasteInput = document.getElementById('paste-input');
+  resultEl.innerHTML = '';
+  if (!termsAccepted) {
+    status.textContent = '';
+    resultEl.innerHTML = '<p class="err">请先阅读并同意免责声明与使用条款，并确认你拥有合法访问权限。</p>';
+    openTerms();
+    return;
+  }
+  status.textContent = '转换中…';
+
+  try {
+    let body;
+    if (fileInput.files.length > 0) {
+      body = { source: await readFileAsJson(fileInput.files[0]) };
+    } else if (urlInput.value.trim()) {
+      body = { url: urlInput.value.trim() };
+    } else if (pasteInput.value.trim()) {
+      body = { source: JSON.parse(pasteInput.value) };
+    } else {
+      status.textContent = '';
+      resultEl.innerHTML = '<p class="err">请上传文件、填写 URL 或粘贴 JSON。</p>';
+      return;
+    }
+
+    body = {
+      ...body,
+      acceptedTerms: true,
+      rightsConfirmed: true,
+      termsVersion: TERMS_VERSION,
+    };
+
+    const res = await fetch('/api/convert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      status.textContent = '';
+      resultEl.innerHTML = `<p class="err">${escapeHtml(data.error?.message || '转换失败')}</p>`;
+      return;
+    }
+    const reused = data.converted.filter((c) => c.alreadyExisted).length;
+    const fresh = data.converted.length - reused;
+    status.textContent = `完成：新转换 ${fresh} 个，已存在复用 ${reused} 个，失败 ${data.errors.length} 个。`;
+
+    let html = '';
+    if (data.converted.length) {
+      html += '<div class="converted-results">';
+      for (const c of data.converted) {
+        html += `
+          <div class="converted-item">
+            <div><strong>${escapeHtml(c.name)}</strong>
+              ${c.alreadyExisted ? '<span class="ok">（已有人转换过，直接复用）</span>' : '<span class="ok">（新转换）</span>'}
+            </div>
+            <div class="discovery-url">${escapeHtml(c.discoveryUrl)}</div>
+            <button class="secondary" data-copy-one="${escapeHtml(c.discoveryUrl)}">复制地址</button>
+          </div>`;
+      }
+      html += '</div>';
+    }
+    if (data.errors.length) {
+      html += `<p class="err">${data.errors.map(escapeHtml).join('<br>')}</p>`;
+    }
+    resultEl.innerHTML = html;
+    resultEl.querySelectorAll('[data-copy-one]').forEach((btn) => {
+      btn.addEventListener('click', () => navigator.clipboard.writeText(btn.dataset.copyOne));
+    });
+    fetchSources();
+  } catch (err) {
+    status.textContent = '';
+    resultEl.innerHTML = `<p class="err">${escapeHtml(err.message)}</p>`;
+  }
+});
+
+termsAccepted = hasCurrentTermsAcceptance();
+setConverterEnabled(termsAccepted);
+if (termsAccepted) {
+  closeTerms();
+  startApp();
+} else {
+  openTerms();
+}
+</script>
+</body>
+</html>
