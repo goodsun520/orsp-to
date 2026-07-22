@@ -41,6 +41,7 @@ const EXPLORE_PROBE_CONCURRENCY = 4;
 export class SourceRuntime {
   private readonly explorePages = new Map<string, { items: SearchResultItem[]; expiresAt: number }>();
   private readonly exploreLoads = new Map<string, Promise<SearchResultItem[]>>();
+  private readonly bookHints = new Map<string, SearchResultItem>();
 
   constructor(
     private readonly registry: SourceRegistry,
@@ -143,7 +144,19 @@ export class SourceRuntime {
   async detail(record: StoredSource, bookId: string) {
     const bookUrl = this.decodeBookUrl(record, bookId);
     const info = await getBookInfo(record.legado, bookUrl, { sourceId: record.id });
-    return { ...this.bookSummary(record, info), id: bookId };
+    const hint = this.bookHints.get(`${record.id}:${bookUrl}`);
+    const merged = hint
+      ? {
+          ...info,
+          title: info.title || hint.title,
+          author: info.author || hint.author,
+          kind: info.kind.length > 0 ? info.kind : hint.kind,
+          lastChapter: info.lastChapter || hint.lastChapter,
+          intro: info.intro || hint.intro,
+          coverUrl: info.coverUrl || hint.coverUrl,
+        }
+      : info;
+    return { ...this.bookSummary(record, merged), id: bookId };
   }
 
   async catalog(record: StoredSource, bookId: string, pagination: RuntimePagination) {
@@ -230,6 +243,10 @@ export class SourceRuntime {
   }
 
   private bookSummary(record: StoredSource, item: SearchResultItem) {
+    const hintKey = `${record.id}:${item.bookUrl}`;
+    this.bookHints.delete(hintKey);
+    this.bookHints.set(hintKey, item);
+    if (this.bookHints.size > 5_000) this.bookHints.delete(this.bookHints.keys().next().value!);
     const coverAssetId = item.coverUrl ? this.registry.registerCoverUrl(record.id, item.coverUrl) : null;
     return {
       id: this.registry.encodeUpstreamUrl(record.id, item.bookUrl),

@@ -56,8 +56,9 @@ describe('public ORSP converter UI', () => {
     expect(html).toContain('导出 JSON');
     expect(html).toContain('导出 CSV');
     expect(html).toContain("if (/^[\\t\\r ]*[=+\\-@]/.test(text))");
-    expect(html).toContain('失败项目');
-    expect(html).toContain('跳过项目（不计为失败）');
+    expect(html).toContain('实测失败（已访问原站）');
+    expect(html).toContain('预检跳过（不计为失败、无需重试）');
+    expect(html).toContain('展开下方分组可查看原因和处理建议');
     expect(html).toContain('items.filter(batchItemSkipped)');
   });
 

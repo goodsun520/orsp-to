@@ -25,16 +25,22 @@ describe('source compatibility classification', () => {
     expect(assessSourceCompatibility(input).cookieMode).toBe(expected);
   });
 
-  it('blocks non-text sources but lets runtime decide optional login/browser fields', () => {
+  it('fast-filters non-text, interactive, and browser-only sources', () => {
     expect(assessSourceCompatibility(source({ bookSourceType: 2 })).canAttemptConversion).toBe(false);
-    expect(assessSourceCompatibility(source({ loginUi: '[]' })).canAttemptConversion).toBe(true);
-    expect(assessSourceCompatibility(source({ startBrowserAwait: 'required' })).canAttemptConversion).toBe(true);
+    expect(assessSourceCompatibility(source({ loginUi: '[]' })).canAttemptConversion).toBe(false);
+    expect(assessSourceCompatibility(source({ startBrowserAwait: 'required' })).canAttemptConversion).toBe(false);
   });
 
-  it('reports embedded JS without rejecting a source before runtime validation', () => {
+  it('fast-filters executable JS/Java rules instead of auditing them', () => {
     const result = assessSourceCompatibility(source({ searchUrl: "@js:url='/search?q={{key}}'" }));
-    expect(result.canAttemptConversion).toBe(true);
-    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'embedded_js_partial', blocking: false }));
+    expect(result.canAttemptConversion).toBe(false);
+    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'embedded_code_unsupported', blocking: true }));
+  });
+
+  it('fast-filters sources explicitly marked unavailable by their maintainer', () => {
+    const result = assessSourceCompatibility(source({ bookSourceComment: '// Error: timeout' }));
+    expect(result.canAttemptConversion).toBe(false);
+    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'source_marked_unavailable', blocking: true }));
   });
 
   it('does not treat a descriptive group label as an actual browser requirement', () => {

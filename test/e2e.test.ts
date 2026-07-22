@@ -438,10 +438,11 @@ describe('ORSP adapter against a self-authored fixture site', () => {
     expect(body.items).toHaveLength(2);
     expect(body.items[0]).toMatchObject({ index: 0, sourceName: '合集成功源', status: 'succeeded' });
     expect(body.items[0].result.discoveryUrl).toContain('/.well-known/open-reading-source.json');
-    expect(body.items[1]).toMatchObject({ index: 1, sourceName: '合集失败源', status: 'failed' });
-    expect(body.items[1].error).toContain('absolute HTTP(S) URL');
+    expect(body.items[1]).toMatchObject({ index: 1, sourceName: '合集失败源', status: 'skipped' });
+    expect(body.items[1].error).toContain('invalid_bookSourceUrl');
     expect(body.converted).toHaveLength(1);
-    expect(body.errors).toHaveLength(1);
+    expect(body.errors).toHaveLength(0);
+    expect(body.skipped).toHaveLength(1);
   });
 
   it('completes a successful source through the asynchronous batch API', async () => {
@@ -484,7 +485,8 @@ describe('ORSP adapter against a self-authored fixture site', () => {
     const body = await response.json();
 
     expect(body.converted).toEqual([]);
-    expect(body.errors[0]).toContain('browser_cookie_unsupported');
+    expect(body.errors).toEqual([]);
+    expect(body.skipped[0]).toContain('browser_cookie_unsupported');
     expect(registry.get(sourceId)?.legado.bookSourceName).toBe('普通 Cookie 会话测试源');
   });
 
@@ -575,6 +577,24 @@ describe('ORSP adapter against a self-authored fixture site', () => {
     );
 
     return { bookId };
+  });
+
+  it('supports declarative @put/@get book-info variables without executing JavaScript', async () => {
+    const variableSource = fixtureSource(new URL('/variable-book-info/', fixtureBaseUrl).toString());
+    variableSource.bookSourceName = '变量详情规则测试源';
+    variableSource.ruleBookInfo = {
+      init: '@put:{n:"class.itemtxt.0@tag.h1.0@tag.a.0@text",a:"class.itemtxt.0@tag.p.1@tag.a.0@text",i:"class.des.0@tag.p.0@text",c:"class.item.0@tag.img.0@src"}',
+      name: '@get:{n}',
+      author: '@get:{a}',
+      intro: '@get:{i}',
+      coverUrl: '@get:{c}',
+    };
+    const { record } = await registry.add(variableSource);
+    const search = await (await fetch(`${appBaseUrl}/s/${record.id}/api/v1/search?q=遨游`)).json();
+    const detail = await (await fetch(`${appBaseUrl}/s/${record.id}/api/v1/books/${search.items[0].id}`)).json();
+    expect(detail).toMatchObject({ title: '遨游星海', author: '墨白' });
+    expect(detail.description).toContain('更详细的简介');
+    expect(detail.coverUrl).toContain(`/s/${record.id}/api/v1/assets/covers/`);
   });
 
   it('chapter catalog paginates via nextTocUrl and sorts by order', async () => {

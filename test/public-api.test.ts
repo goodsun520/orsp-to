@@ -85,7 +85,8 @@ describe('public convert + leaderboard API', () => {
     const firstBody = await first.json();
     expect(firstBody.converted).toHaveLength(0);
     expect(firstBody.errors).toHaveLength(1);
-    expect(firstBody.errors[0]).toContain('conversion failed at search');
+    expect(firstBody.errors[0]).toContain('upstream_unavailable');
+    expect(firstBody.errors[0]).toContain('处理建议');
 
     const list = await fetch(`${appBaseUrl}/api/sources?sort=usage`);
     const listBody = await list.json();
@@ -105,8 +106,9 @@ describe('public convert + leaderboard API', () => {
 
     expect(response.status).toBe(200);
     expect(body.converted).toHaveLength(0);
-    expect(body.errors).toHaveLength(1);
-    expect(body.errors[0]).toContain('bookSourceType 0');
+    expect(body.errors).toEqual([]);
+    expect(body.skipped).toHaveLength(1);
+    expect(body.skipped[0]).toContain('non_text_source');
   });
 
   it('observes audit health changes without a service restart', async () => {

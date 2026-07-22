@@ -582,34 +582,63 @@ function publicSourceDetail(record: StoredSource, origin: string) {
   };
 }
 
-function validateLegadoSource(value: unknown): { ok: true } | { ok: false; reason: string } {
-  if (!value || typeof value !== 'object') return { ok: false, reason: 'not a JSON object' };
+function validateLegadoSource(value: unknown): { ok: true } | { ok: false; error: string } {
+  if (!value || typeof value !== 'object') {
+    return {
+      ok: false,
+      error: '输入无效（invalid_source）：该项目不是书源对象。处理建议：检查合集 JSON，删除空项或损坏项。',
+    };
+  }
   const source = value as Partial<LegadoBookSource>;
   if (!source.bookSourceUrl || typeof source.bookSourceUrl !== 'string') {
-    return { ok: false, reason: 'missing bookSourceUrl' };
+    return {
+      ok: false,
+      error: '缺少地址（missing_bookSourceUrl）：没有 bookSourceUrl。处理建议：补充原网站的 HTTP(S) 根地址。',
+    };
   }
   if (!source.bookSourceName || typeof source.bookSourceName !== 'string') {
-    return { ok: false, reason: 'missing bookSourceName' };
+    return {
+      ok: false,
+      error: '缺少名称（missing_bookSourceName）：没有 bookSourceName。处理建议：补充书源名称后再试。',
+    };
   }
   if (source.bookSourceType !== undefined && source.bookSourceType !== 0) {
-    return { ok: false, reason: 'only text book sources (bookSourceType 0) are supported' };
+    return {
+      ok: false,
+      error: `类型不支持（non_text_source）：bookSourceType=${source.bookSourceType}，当前只支持文本书源（0）。处理建议：移除该项或换用文本书源。`,
+    };
   }
   try {
     const url = new URL(cleanSourceBaseUrl(source.bookSourceUrl));
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      return { ok: false, reason: 'bookSourceUrl must use HTTP(S)' };
+      return {
+        ok: false,
+        error: '地址无效（invalid_bookSourceUrl）：bookSourceUrl 必须使用 HTTP(S)。处理建议：检查协议和域名。',
+      };
     }
   } catch {
-    return { ok: false, reason: 'bookSourceUrl must be an absolute HTTP(S) URL' };
+    return {
+      ok: false,
+      error: '地址无效（invalid_bookSourceUrl）：bookSourceUrl 不是完整的 HTTP(S) 地址。处理建议：填写包含协议和域名的绝对地址。',
+    };
   }
   if (!source.ruleSearch?.bookList || !source.searchUrl) {
-    return { ok: false, reason: 'missing searchUrl/ruleSearch.bookList' };
+    return {
+      ok: false,
+      error: '缺少搜索规则（missing_search_rule）：需要 searchUrl 和 ruleSearch.bookList。处理建议：补齐搜索规则；没有搜索能力的书源无法转换。',
+    };
   }
   if (!source.ruleToc?.chapterList) {
-    return { ok: false, reason: 'missing ruleToc.chapterList' };
+    return {
+      ok: false,
+      error: '缺少目录规则（missing_toc_rule）：没有 ruleToc.chapterList。处理建议：补齐章节列表规则。',
+    };
   }
   if (!source.ruleContent?.content) {
-    return { ok: false, reason: 'missing ruleContent.content' };
+    return {
+      ok: false,
+      error: '缺少正文规则（missing_content_rule）：没有 ruleContent.content。处理建议：补齐正文提取规则。',
+    };
   }
   return { ok: true };
 }
@@ -632,40 +661,24 @@ async function convertLegadoSource(
   { ok: true; converted: ConvertedSource } |
   { ok: false; status: 'skipped' | 'failed'; error: string }
 > {
-  const name = sourceDisplayName(entry);
   const validation = validateLegadoSource(entry);
   if (!validation.ok) {
-    const status = [
-      'only text book sources (bookSourceType 0) are supported',
-      'missing searchUrl/ruleSearch.bookList',
-      'missing ruleToc.chapterList',
-      'missing ruleContent.content',
-    ].includes(validation.reason) ? 'skipped' : 'failed';
-    return { ok: false, status, error: `${name}: ${validation.reason}` };
+    return { ok: false, status: 'skipped', error: validation.error };
   }
 
   const candidate = entry as LegadoBookSource;
   const compatibility = assessSourceCompatibility(candidate);
   if (!compatibility.canAttemptConversion) {
     const issue = compatibility.issues.find((item) => item.blocking)!;
-    return { ok: false, status: 'skipped', error: `${candidate.bookSourceName}: ${issue.code}: ${issue.message}` };
-  }
-  const browserIssue = compatibility.issues.find((item) => item.code === 'browser_cookie_unsupported');
-  if (browserIssue) {
-    return { ok: false, status: 'skipped', error: `${candidate.bookSourceName}: ${browserIssue.code}: ${browserIssue.message}` };
+    return { ok: false, status: 'skipped', error: `无法自动转换（${issue.code}）：${issue.message}` };
   }
 
   const audit = await auditLegadoSource(candidate);
   if (audit.status === 'parse_failed') {
-    const sessionIssue = compatibility.issues.find((item) =>
-      ['browser_cookie_unsupported', 'interactive_login_unsupported'].includes(item.code),
-    );
     return {
       ok: false,
       status: 'failed',
-      error: sessionIssue
-        ? `${candidate.bookSourceName}: ${sessionIssue.code}: ${sessionIssue.message} Runtime validation failed at ${audit.stage}.`
-        : `${candidate.bookSourceName}: conversion failed at ${audit.stage}: ${audit.reason}`,
+      error: formatAuditFailure(audit.stage, audit.reason),
     };
   }
 
@@ -681,6 +694,26 @@ async function convertLegadoSource(
     ok: true,
     converted: { ...publicSourceDetail(record, publicOrigin), alreadyExisted: !isNew },
   };
+}
+
+function formatAuditFailure(stage: string, reason: string): string {
+  if (reason === 'upstream source is unavailable') {
+    return '实测失败（upstream_unavailable）：目标网站连接失败、超时或返回服务器错误。处理建议：先直接访问原站确认是否恢复，恢复后可“仅重试失败项”。';
+  }
+  if (stage === 'search' && reason === 'no parseable results') {
+    return '实测失败（search_no_results）：已尝试常见关键词，但没有解析到书籍。可能是网站改版、规则过期或站内无匹配结果。处理建议：先在阅读 App 中确认该源还能搜索，再决定是否修规则。';
+  }
+  if (stage === 'route_contract') {
+    return `实测失败（route_contract）：搜索结果生成的详情或章节地址无效/超出允许范围。处理建议：检查 bookUrl、tocUrl、chapterUrl。技术信息：${reason}`;
+  }
+  const stageLabels: Record<string, string> = {
+    discover: '发现页',
+    search: '搜索',
+    detail: '详情',
+    catalog: '目录',
+    content: '正文',
+  };
+  return `实测失败（${stage}）：${stageLabels[stage] ?? stage}链路未通过。处理建议：原站可访问时，检查对应规则是否已过期。技术信息：${reason}`;
 }
 
 function requireConversionConsent(req: Request, res: Response): boolean {

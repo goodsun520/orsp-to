@@ -1,6 +1,7 @@
 /** Legado (阅读 app) book source rule JSON — only the fields this adapter uses. */
 export interface LegadoRuleSearch {
   bookList?: string;
+  checkKeyWord?: string;
   name?: string;
   author?: string;
   kind?: string;

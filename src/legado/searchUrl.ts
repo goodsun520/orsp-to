@@ -154,12 +154,8 @@ export function parseLegadoJsonObject(raw: string): Record<string, unknown> | un
   let s = raw.trim();
   if (s.startsWith('{{') && !s.endsWith('}}')) s = s.slice(1);
   if (!s.startsWith('{')) return undefined;
-  // Replace single-quoted strings with double-quoted, escaping interior doubles.
   try {
-    const jsonish = s.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_, inner: string) => {
-      const escaped = inner.replace(/\\'/g, "'").replace(/"/g, '\\"');
-      return `"${escaped}"`;
-    });
+    const jsonish = normalizeSingleQuotedJson(s);
     const parsed = JSON.parse(jsonish);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
@@ -168,6 +164,48 @@ export function parseLegadoJsonObject(raw: string): Record<string, unknown> | un
     // fall through
   }
   return undefined;
+}
+
+function normalizeSingleQuotedJson(value: string): string {
+  let output = '';
+  let quote: 'single' | 'double' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    const next = value[index + 1];
+    if (quote === 'double') {
+      output += char;
+      if (char === '\\' && next !== undefined) output += value[++index];
+      else if (char === '"') quote = null;
+      continue;
+    }
+    if (quote === 'single') {
+      if (char === '\\' && next !== undefined) {
+        if (next === "'") {
+          output += "'";
+          index += 1;
+        } else {
+          output += char + next;
+          index += 1;
+        }
+      } else if (char === "'") {
+        output += '"';
+        quote = null;
+      } else if (char === '"') {
+        output += '\\"';
+      } else {
+        output += char;
+      }
+      continue;
+    }
+    if (char === "'") {
+      output += '"';
+      quote = 'single';
+    } else {
+      output += char;
+      if (char === '"') quote = 'double';
+    }
+  }
+  return output;
 }
 
 /**

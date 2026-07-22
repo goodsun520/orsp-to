@@ -314,10 +314,10 @@ describe('conversion job API', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     expect(job.status).toBe('completed');
-    expect(job.progress).toMatchObject({ total: 3, skipped: 2, failed: 1, completed: 3 });
+    expect(job.progress).toMatchObject({ total: 3, skipped: 3, failed: 0, completed: 3 });
     expect(job.items[0]).toMatchObject({ index: 0, status: 'skipped' });
     expect(job.items[0].sourceName).toBe('missing fields');
-    expect(job.items[0].error).toContain('missing searchUrl/ruleSearch.bookList');
+    expect(job.items[0].error).toContain('missing_search_rule');
     expect(job.items[1]).toMatchObject({ sourceName: 'browser-only', status: 'skipped' });
     expect(job.items[1].error).toContain('browser_cookie_unsupported');
 
@@ -325,8 +325,8 @@ describe('conversion job API', () => {
       method: 'POST',
       headers: ownerHeaders,
     });
-    expect(retried.status).toBe(202);
-    expect(['running', 'completed']).toContain((await retried.json()).status);
+    expect(retried.status).toBe(409);
+    expect((await retried.json()).error.code).toBe('NO_FAILED_ITEMS');
 
     const lateChunk = await fetch(`${baseUrl}/api/conversion-jobs/${created.jobId}/chunks`, {
       method: 'POST',

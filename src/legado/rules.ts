@@ -237,7 +237,7 @@ export async function getBookInfo(source: LegadoBookSource, bookUrl: string, ctx
       extractValue($, scope, '@css:meta[property="og:image"]@content'),
     ),
     bookUrl: url,
-    tocUrl: absolutize(extractHtmlUrl($, scope, rule.tocUrl), url),
+    tocUrl: absolutize(extractBookInfoUrl($, scope, rule.tocUrl, variables), url),
   }, url);
 }
 
@@ -284,6 +284,16 @@ function extractBookInfoList(
     .split(/[\n,]+/)
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function extractBookInfoUrl(
+  $: ReturnType<typeof parseHtml>,
+  scope: Parameters<typeof extractValue>[1],
+  rule: string | undefined,
+  variables: Map<string, string>,
+): string {
+  const key = rule?.trim().match(/^@get:\{([A-Za-z_]\w*)\}$/i)?.[1];
+  return key ? variables.get(key) ?? '' : extractHtmlUrl($, scope, rule);
 }
 
 function firstValue(...values: string[]): string {

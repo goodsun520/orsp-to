@@ -238,6 +238,16 @@ export function selectNodes($: CheerioAPI, scope: Node[], rule: string | undefin
   const trimmed = stripNonExecutableJs(rule);
   if (!trimmed) return [];
 
+  // Legado list rules commonly use `a||b` as ordered selector fallbacks.
+  // Try each branch independently and stop at the first branch that matches.
+  if (trimmed.includes('||')) {
+    for (const alternative of trimmed.split('||').map((item) => item.trim()).filter(Boolean)) {
+      const matched = selectNodes($, scope, alternative);
+      if (matched.length > 0) return matched;
+    }
+    return [];
+  }
+
   // Full-rule CSS dialect: `@css:.item` / `@css:#ListContents>div`
   // Optional trailing `@text` / `@href` is handled by extractValue, not here.
   const cssList = trimmed.match(/^@css:(.+?)(?:@(?!css:)(.*))?$/i);

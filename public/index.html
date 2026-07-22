@@ -571,6 +571,7 @@
               <div id="batch-progress-bar" class="progress-bar"></div>
             </div>
             <div id="batch-status" class="muted" aria-live="polite"></div>
+            <p class="muted">“跳过”表示预检已确认不适合自动转换（如缺规则、非文本、JS/Java、登录或 WebView），不会浪费时间反复请求；“失败”表示已进行安全实测，但原站连接或解析链路未通过。展开下方分组可查看原因和处理建议。</p>
             <div class="batch-counts" aria-label="合集转换计数">
               <div class="batch-count"><strong id="batch-total">0</strong><span>总数</span></div>
               <div class="batch-count"><strong id="batch-pending">0</strong><span>待处理 / 处理中</span></div>
@@ -1120,7 +1121,7 @@ function renderBatchSnapshot(raw) {
   }
   const failureGroups = groupBatchFailures(snapshot.items);
   if (failureGroups.size) {
-    html += '<div class="failure-groups"><h3>失败项目</h3>';
+    html += '<div class="failure-groups"><h3>实测失败（已访问原站）</h3>';
     for (const [message, names] of failureGroups) {
       html += `<details class="failure-group"><summary>${escapeHtml(message)}（${names.length}）</summary><ul>${names.map((name) => `<li>${escapeHtml(name)}</li>`).join('')}</ul></details>`;
     }
@@ -1128,7 +1129,7 @@ function renderBatchSnapshot(raw) {
   }
   const skipGroups = groupBatchSkips(snapshot.items);
   if (skipGroups.size) {
-    html += '<div class="failure-groups"><h3>跳过项目（不计为失败）</h3>';
+    html += '<div class="failure-groups"><h3>预检跳过（不计为失败、无需重试）</h3>';
     for (const [message, names] of skipGroups) {
       html += `<details class="failure-group"><summary>${escapeHtml(message)}（${names.length}）</summary><ul>${names.map((name) => `<li>${escapeHtml(name)}</li>`).join('')}</ul></details>`;
     }
@@ -1311,7 +1312,7 @@ async function convertSingle(body) {
   }
   const failedItems = items.filter((item) => item?.status === 'failed');
   if (failedItems.length) {
-    html += `<div class="failure-groups"><h3>失败项目</h3>${failedItems.map((item) =>
+    html += `<div class="failure-groups"><h3>实测失败（已访问原站）</h3>${failedItems.map((item) =>
       `<div class="err"><strong>${escapeHtml(item.sourceName || `第 ${(item.index ?? 0) + 1} 项`)}</strong>：${escapeHtml(item.error || '未知错误')}</div>`
     ).join('')}</div>`;
   } else if (errors.length) {
@@ -1319,7 +1320,7 @@ async function convertSingle(body) {
   }
   const skippedItems = items.filter((item) => item?.status === 'skipped');
   if (skippedItems.length) {
-    html += `<div class="failure-groups"><h3>跳过项目（不计为失败）</h3>${skippedItems.map((item) =>
+    html += `<div class="failure-groups"><h3>预检跳过（不计为失败、无需重试）</h3>${skippedItems.map((item) =>
       `<div><strong>${escapeHtml(item.sourceName || `第 ${(item.index ?? 0) + 1} 项`)}</strong>：${escapeHtml(item.error || '不兼容')}</div>`
     ).join('')}</div>`;
   }

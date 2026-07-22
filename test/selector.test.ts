@@ -91,4 +91,11 @@ describe('selectNodes + extractValue', () => {
     expect(extractValue($, root, 'class.book clearfix@text')).toBe('结果');
     expect(selectNodes($, root, 'class.book clearfix')).toHaveLength(1);
   });
+
+  it('uses the first matching || alternative for list selectors', () => {
+    const $ = parseHtml('<div id="bookdetail"></div><table class="grid"><tr></tr></table>');
+    const root = [$.root().get(0)!];
+    expect(selectNodes($, root, 'class.missing@tag.tr||id.bookdetail')).toHaveLength(1);
+    expect(selectNodes($, root, 'class.grid@tag.tr||id.bookdetail')[0]?.name).toBe('tr');
+  });
 });

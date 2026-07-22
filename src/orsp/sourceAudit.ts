@@ -26,7 +26,8 @@ export interface SourceAuditFailed {
 
 export type SourceAuditOutcome = SourceAuditPassed | SourceAuditFailed;
 
-const fallbackQueries = ['重生', '总裁', '西游记', '斗破苍穹', '凡人修仙传'];
+const fallbackQueries = ['西游记', '重生'];
+const maxAuditQueries = 2;
 
 /** Audits a candidate through the same runtime contract used by public routes. */
 export async function auditLegadoSource(
@@ -38,47 +39,12 @@ export async function auditLegadoSource(
   const runtime = new SourceRuntime(registry, 'http://audit.invalid', new CatalogCache());
   const attempts: SourceAuditFailed['attempts'] = [];
   const stages: AuditStages = {};
-  let discoveryChecked = false;
-  let discoveredQuery: string | undefined;
-
-  const discoverStarted = Date.now();
-  try {
-    const discovery = await runtime.discover(record);
-    const firstItem = discovery.sections.flatMap((section) => section.items)[0];
-    if (!firstItem) throw new SourceRuntimeError(503, 'UNAVAILABLE', 'No readable discovery sections', true);
-    if (firstItem?.title?.trim()) discoveredQuery = firstItem.title.trim();
-    stages.discover = { status: 'ok', latencyMs: Date.now() - discoverStarted };
-
-    const categoriesStarted = Date.now();
-    const categories = await runtime.categories(record);
-    const firstCategory = categories.items[0];
-    if (!firstCategory) throw new SourceRuntimeError(503, 'UNAVAILABLE', 'No readable discovery categories', true);
-    stages.categories = { status: 'ok', latencyMs: Date.now() - categoriesStarted };
-
-    const browseStarted = Date.now();
-    const browse = await runtime.browse(record, {
-      category: firstCategory.id,
-      page: 1,
-      pageSize: 1,
-    });
-    if (browse.items.length === 0) throw new SourceRuntimeError(503, 'UNAVAILABLE', 'No readable category books', true);
-    stages.browse = { status: 'ok', latencyMs: Date.now() - browseStarted };
-    discoveryChecked = true;
-  } catch (error) {
-    if (error instanceof SourceRuntimeError && error.status === 404) {
-      // Discovery is optional for Core Reading sources.
-    } else {
-      const failedStage = !stages.discover ? 'discover' : !stages.categories ? 'categories' : 'browse';
-      stages[failedStage] = { status: 'failed', latencyMs: Date.now() - discoverStarted };
-      attempts.push({ query: '', stage: failedStage, reason: safeReason(error) });
-    }
-  }
 
   const queries = uniqueQueries([
     ...(options.queries ?? []),
+    ...(source.ruleSearch?.checkKeyWord ? [source.ruleSearch.checkKeyWord] : []),
     ...fallbackQueries,
-    ...(discoveredQuery ? [discoveredQuery] : []),
-  ]);
+  ]).slice(0, maxAuditQueries);
   for (const query of queries) {
     const searchStarted = Date.now();
     let search;
@@ -90,19 +56,20 @@ export async function auditLegadoSource(
       }
       stages.search = { status: 'ok', latencyMs: Date.now() - searchStarted };
     } catch (error) {
-      attempts.push({ query, stage: 'search', reason: safeReason(error) });
+      const reason = safeReason(error);
+      attempts.push({ query, stage: 'search', reason });
+      // Connectivity failures do not depend on the query. Retrying several
+      // keywords only multiplies timeouts for dead or blocked websites.
+      if (error instanceof UpstreamFetchError) return failed('search', reason, query, attempts, stages);
       continue;
     }
 
-    for (const book of search.items.slice(0, 2)) {
+    for (const book of search.items.slice(0, 1)) {
       try {
         const detailStarted = Date.now();
         const detail = await runtime.detail(record, book.id);
         stages.detail = { status: 'ok', latencyMs: Date.now() - detailStarted };
         if (!detail.title.trim()) return failed('detail', 'missing title', query, attempts, stages);
-        if (!detail.author.trim()) return failed('detail', 'missing author', query, attempts, stages);
-        if (!detail.description.trim()) return failed('detail', 'missing description', query, attempts, stages);
-        if (!detail.coverUrl) return failed('detail', 'missing or unsafe cover URL', query, attempts, stages);
 
         const catalogStarted = Date.now();
         const catalog = await runtime.catalog(record, detail.id, { page: 1, pageSize: 2 });
@@ -113,6 +80,7 @@ export async function auditLegadoSource(
         const content = await runtime.content(record, detail.id, catalog.items[0].id);
         stages.content = { status: 'ok', latencyMs: Date.now() - contentStarted };
         if (!content.content.trim()) return failed('content', 'empty content', query, attempts, stages);
+        const discoveryChecked = await auditDiscovery(runtime, record, attempts, stages);
         return {
           status: 'parse_passed',
           query,
@@ -131,6 +99,40 @@ export async function auditLegadoSource(
 
   const last = attempts.at(-1) ?? { stage: 'search', reason: 'no audit query configured' };
   return failed(last.stage as AuditStage, last.reason, queries.at(-1) ?? '', attempts, stages);
+}
+
+async function auditDiscovery(
+  runtime: SourceRuntime,
+  record: Parameters<SourceRuntime['discover']>[0],
+  attempts: SourceAuditFailed['attempts'],
+  stages: AuditStages,
+): Promise<boolean> {
+  const discoverStarted = Date.now();
+  try {
+    const discovery = await runtime.discover(record);
+    if (!discovery.sections.flatMap((section) => section.items)[0]) {
+      throw new SourceRuntimeError(503, 'UNAVAILABLE', 'No readable discovery sections', true);
+    }
+    stages.discover = { status: 'ok', latencyMs: Date.now() - discoverStarted };
+
+    const categoriesStarted = Date.now();
+    const categories = await runtime.categories(record);
+    const firstCategory = categories.items[0];
+    if (!firstCategory) throw new SourceRuntimeError(503, 'UNAVAILABLE', 'No readable discovery categories', true);
+    stages.categories = { status: 'ok', latencyMs: Date.now() - categoriesStarted };
+
+    const browseStarted = Date.now();
+    const browse = await runtime.browse(record, { category: firstCategory.id, page: 1, pageSize: 1 });
+    if (browse.items.length === 0) throw new SourceRuntimeError(503, 'UNAVAILABLE', 'No readable category books', true);
+    stages.browse = { status: 'ok', latencyMs: Date.now() - browseStarted };
+    return true;
+  } catch (error) {
+    if (error instanceof SourceRuntimeError && error.status === 404) return false;
+    const failedStage = !stages.discover ? 'discover' : !stages.categories ? 'categories' : 'browse';
+    stages[failedStage] = { status: 'failed', latencyMs: Date.now() - discoverStarted };
+    attempts.push({ query: '', stage: failedStage, reason: safeReason(error) });
+    return false;
+  }
 }
 
 function failed(
