@@ -12,7 +12,7 @@ RestartSec=2
 Environment=PORT=8790
 Environment=PUBLIC_ORIGIN=https://book.openany.shop
 Environment=DATA_DIR=/opt/orsp-legado-adapter/data/sources
-# ADMIN_PASSWORD lives only in secrets.env on the server, never in git.
+# GitHub OAuth secret, optional recovery password, and STATS_HASH_KEY live only in secrets.env.
 EnvironmentFile=-/opt/orsp-legado-adapter/secrets.env
 NoNewPrivileges=true
 ProtectSystem=strict

@@ -71,7 +71,10 @@ npm run check
 | `PORT` | `8790` | HTTP 监听端口 |
 | `PUBLIC_ORIGIN` | `http://127.0.0.1:$PORT` | 写入 ORSP 地址的公开来源 |
 | `DATA_DIR` | `./data/sources` | 已转换书源的持久化目录 |
-| `ADMIN_PASSWORD` | 空 | 管理页密码；为空时管理登录禁用 |
+| `GITHUB_OAUTH_CLIENT_ID` | 空 | GitHub OAuth App Client ID；回调地址为 `$PUBLIC_ORIGIN/api/admin/github/callback` |
+| `GITHUB_OAUTH_CLIENT_SECRET` | 空 | GitHub OAuth App Client Secret，仅放入部署 secrets 环境 |
+| `GITHUB_ADMIN_LOGINS` | 空 | 额外管理员 GitHub 用户名，逗号分隔；`miloquinn` 始终为管理员 |
+| `ADMIN_PASSWORD` | 空 | 可选的本地恢复密码；管理页面默认只展示 GitHub 登录 |
 | `STATS_HASH_KEY` | 开发默认值 | 生产环境必须设置，用于匿名指标 HMAC |
 | `COVER_FETCH_TIMEOUT_MS` | `10000` | 单次封面上游请求（含排队）的超时毫秒数 |
 | `COVER_UPSTREAM_CONNECTIONS` | `6` | 每个上游来源允许的最大并发连接数，最高限制为 32 |
@@ -82,6 +85,17 @@ npm run check
 
 `.env.example` 仅作为变量清单。项目不会自动加载 `.env`；请通过运行环境、
 systemd 或 Node.js `--env-file` 传入配置。
+
+站点暗号不通过环境变量保存。管理员登录 `/admin.html` 后可随时设置或替换；
+服务端只在 `$DATA_DIR/.admin/site-access.json` 保存加盐哈希，暗号变更会立即使旧访问会话失效。
+举报记录保存在 `$DATA_DIR/.admin/source-reports.json`，安全事件与 IP 封禁保存在
+`$DATA_DIR/.admin/ip-security.json`。为支持滥用调查和封禁，举报、暗号失败和管理员恢复密码失败
+会记录原始 IP；正常阅读统计仍只保存 HMAC 标识，不保存原始 IP。
+
+GitHub 登录需要先在 GitHub 创建 OAuth App：Homepage URL 填 `PUBLIC_ORIGIN`，
+Authorization callback URL 填 `$PUBLIC_ORIGIN/api/admin/github/callback`。随后把 Client ID 和
+Client Secret 分别写入 `GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_CLIENT_SECRET`；生产环境的
+Client Secret 应放在 systemd 已加载且不会同步进仓库的 `secrets.env` 中。
 
 ## API
 
@@ -97,6 +111,21 @@ systemd 或 Node.js `--env-file` 传入配置。
 | `POST` | `/api/conversion-jobs/:id/retry` | 仅重新审计已完成任务中的失败项 |
 | `POST` | `/api/conversion-jobs/:id/cancel` | 取消未封口或仍在执行的合集任务 |
 | `POST` | `/api/sources/:id/vote` | 匿名点赞 |
+| `POST` | `/api/sources/:id/reports` | 举报排行榜书源；保存原因、说明和提交 IP |
+| `GET` | `/api/access/status` | 查询网站暗号门禁状态 |
+| `POST` | `/api/access/unlock` | 使用当前暗号解锁排行榜与转换 API |
+| `GET` | `/api/admin/github/start` | 发起 GitHub 管理员登录 |
+| `GET` | `/api/admin/github/callback` | GitHub OAuth 回调 |
+| `GET` | `/api/admin/sources` | 管理员查看全部书源（含隐藏和审计失败项） |
+| `GET` | `/api/admin/access` | 管理员查看暗号配置状态（不返回暗号） |
+| `POST` | `/api/admin/access` | 管理员设置、替换或清空网站暗号 |
+| `POST` | `/api/admin/sources/:id/visibility` | 管理员隐藏或恢复排行榜项目 |
+| `DELETE` | `/api/admin/sources/:id` | 管理员永久删除书源 |
+| `GET` | `/api/admin/reports` | 管理员查看举报记录和提交 IP |
+| `POST` | `/api/admin/reports/:id/resolve` | 管理员下架排行榜或忽略举报 |
+| `GET` | `/api/admin/security` | 管理员查看失败认证、举报 IP 和封禁列表 |
+| `POST` | `/api/admin/security/bans` | 管理员封禁 IP |
+| `POST` | `/api/admin/security/unban` | 管理员解除 IP 封禁 |
 | `GET` | `/s/:id/.well-known/open-reading-source.json` | ORSP 发现文档 |
 | `GET` | `/s/:id/api/v1/...` | ORSP 读取接口 |
 
@@ -126,7 +155,7 @@ systemd 或 Node.js `--env-file` 传入配置。
 ## 数据与隐私
 
 - 导入的书源规则保存在 `DATA_DIR`，该目录默认被 Git 忽略。
-- 原始 IP、城市和地理位置不会持久化或公开。
+- 正常阅读与点赞不会持久化原始 IP；举报、失败认证和管理员 IP 封禁会为安全处置保存原始 IP，但不会通过公开 API 暴露。城市和地理位置不采集、不持久化。
 - 点赞去重和近期读者统计只保存由 `STATS_HASH_KEY` 生成的 HMAC 标识，并限制数量。
 - 运行时获得的 Cookie 只存在于进程内存，不写入公开 API、日志、审计报告或 Git。
 - 已验证的封面响应临时保存在 `COVER_CACHE_DIR`，受大小和最长保留时间限制；只在同一已登记封面 URL 上游暂时失败时返回旧缓存。

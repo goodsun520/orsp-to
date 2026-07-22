@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23090c0a'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23a8f0b3' stroke-width='6'/%3E%3C/svg%3E" />
 <title>ORSP 转换器｜将书源转换为 ORSP 格式</title>
 <meta name="description" content="将书源 JSON 转换为可直接使用的 ORSP 地址，并查看已验证书源的公开状态。" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23a8f0b3'/%3E%3Cpath d='M18 17h17c8 0 13 5 13 15S43 47 35 47H18V17Zm10 8v14h6c4 0 6-2 6-7s-2-7-6-7h-6Z' fill='%23102114'/%3E%3C/svg%3E" />
@@ -196,7 +197,7 @@
   }
   .section-description { margin: 0.45rem 0 1.25rem; color: var(--muted); font-size: 0.9rem; }
   label { display: block; font-weight: 650; margin: 1rem 0 0.4rem; font-size: 0.88rem; }
-  input[type="text"], input[type="url"], textarea, select {
+  input[type="text"], input[type="password"], input[type="url"], textarea, select {
     width: 100%;
     padding: 0.72rem 0.85rem;
     border-radius: 9px;
@@ -322,6 +323,69 @@
     backdrop-filter: blur(12px);
   }
   .consent-overlay[hidden] { display: none; }
+  .access-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 110;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background:
+      linear-gradient(rgba(168, 240, 179, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(168, 240, 179, 0.035) 1px, transparent 1px),
+      rgba(5, 8, 6, 0.96);
+    background-size: 34px 34px, 34px 34px, auto;
+    backdrop-filter: blur(14px);
+  }
+  .access-overlay[hidden] { display: none; }
+  .access-dialog {
+    width: min(500px, 100%);
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: 24px 12px 24px 12px;
+    background: #101511;
+    box-shadow: 0 30px 100px rgba(0, 0, 0, 0.58);
+  }
+  .access-mark {
+    display: grid;
+    place-items: center;
+    width: 3rem;
+    height: 3rem;
+    margin-bottom: 1.5rem;
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    color: var(--accent);
+    font: 800 1.15rem/1 "DIN Alternate", sans-serif;
+  }
+  .access-dialog h2 { margin-top: 0.35rem; font-size: clamp(1.75rem, 6vw, 2.8rem); }
+  .access-dialog p { color: var(--muted); }
+  .access-body { padding: clamp(1.4rem, 5vw, 2.6rem); }
+  .access-form { display: grid; grid-template-columns: 1fr auto; gap: 0.6rem; margin-top: 1.35rem; }
+  .access-form input { min-width: 0; }
+  .access-form button { margin-top: 0; }
+  .access-error { min-height: 1.3rem; margin: 0.6rem 0 0; color: var(--err) !important; font-size: 0.85rem; }
+  .report-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 105;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: rgba(5, 8, 6, 0.9);
+    backdrop-filter: blur(12px);
+  }
+  .report-overlay[hidden] { display: none; }
+  .report-dialog {
+    width: min(540px, 100%);
+    border: 1px solid var(--border-strong);
+    border-radius: 20px;
+    padding: clamp(1.3rem, 4vw, 2rem);
+    background: #101511;
+    box-shadow: 0 30px 100px rgba(0, 0, 0, 0.55);
+  }
+  .report-dialog p { color: var(--muted); }
+  .report-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .report-actions button { margin-top: 0; }
   .consent-dialog {
     width: min(760px, 100%);
     max-height: min(88dvh, 820px);
@@ -476,6 +540,7 @@
     .toolbar .row { width: 100%; }
     .search-box { max-width: none; }
     .batch-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .access-form { grid-template-columns: 1fr; }
     footer { display: block; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -625,7 +690,23 @@
     </footer>
   </div>
 
-  <div class="consent-overlay" id="consent-overlay" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-description">
+  <div class="access-overlay" id="access-overlay" role="dialog" aria-modal="true" aria-labelledby="access-title" aria-describedby="access-description">
+    <section class="access-dialog">
+      <div class="access-body">
+        <div class="access-mark">IN</div>
+        <div class="legal-eyebrow">INTERNAL LEARNING ACCESS</div>
+        <h2 id="access-title" tabindex="-1">请输入暗号</h2>
+        <p id="access-description"><strong style="color:var(--text)">本网站仅供内部学习交流使用。</strong>请输入当前暗号，通过后再阅读并确认使用协议。</p>
+        <form id="access-form" class="access-form">
+          <input id="access-passphrase" type="password" autocomplete="current-password" maxlength="128" placeholder="暗号支持汉字、字母、数字或符号" aria-label="网站访问暗号" />
+          <button id="access-submit" type="submit">进入网站</button>
+        </form>
+        <p id="access-error" class="access-error" role="alert"></p>
+      </div>
+    </section>
+  </div>
+
+  <div class="consent-overlay" id="consent-overlay" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-description" hidden>
     <section class="consent-dialog">
       <header class="consent-header">
         <div class="legal-eyebrow">TERMS · 2026-07-22</div>
@@ -660,6 +741,31 @@
     </section>
   </div>
 
+  <div class="report-overlay" id="report-overlay" role="dialog" aria-modal="true" aria-labelledby="report-title" hidden>
+    <section class="report-dialog">
+      <div class="legal-eyebrow">SOURCE REPORT</div>
+      <h2 id="report-title" tabindex="-1">举报这个书源</h2>
+      <p>举报将提交给管理员处理。管理员可以将该书源下架排行榜或忽略本次举报；为防止滥用，安全记录会保存提交 IP。</p>
+      <p id="report-source" style="color:var(--text);font-weight:700"></p>
+      <form id="report-form">
+        <label for="report-reason">举报原因</label>
+        <select id="report-reason">
+          <option value="infringement">疑似侵权</option>
+          <option value="unavailable">无法使用</option>
+          <option value="malicious">恶意跳转或安全风险</option>
+          <option value="other">其他问题</option>
+        </select>
+        <label for="report-details">补充说明（最多 500 字）</label>
+        <textarea id="report-details" maxlength="500" placeholder="请提供便于管理员核实的信息…"></textarea>
+        <p id="report-status" class="muted" role="status"></p>
+        <div class="report-actions">
+          <button id="report-submit" type="submit">提交举报</button>
+          <button id="report-cancel" class="ghost" type="button">取消</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
 <script>
 const VOTED_KEY = 'orsp_voted_ids';
 const TERMS_KEY = 'orsp_terms_acceptance';
@@ -676,8 +782,10 @@ let cachedItems = [];
 let cachedSummary = null;
 let termsAccepted = false;
 let appStarted = false;
+let siteAccessGranted = false;
 let activeJobId = null;
 let batchPollToken = 0;
+let reportingSource = null;
 
 function votedIds() {
   try { return new Set(JSON.parse(localStorage.getItem(VOTED_KEY) || '[]')); } catch { return new Set(); }
@@ -717,6 +825,48 @@ function startApp() {
     if (document.visibilityState === 'visible') fetchGithubStars();
   });
   resumeSavedBatchJob();
+}
+
+function openAccess(message = '') {
+  const overlay = document.getElementById('access-overlay');
+  overlay.hidden = false;
+  document.querySelector('.page-shell').inert = true;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('access-error').textContent = message;
+  requestAnimationFrame(() => document.getElementById('access-title').focus());
+}
+
+function closeAccess() {
+  document.getElementById('access-overlay').hidden = true;
+}
+
+function continueAfterAccess() {
+  termsAccepted = hasCurrentTermsAcceptance();
+  setConverterEnabled(termsAccepted);
+  if (termsAccepted) {
+    closeTerms();
+    startApp();
+  } else {
+    openTerms();
+  }
+}
+
+async function bootstrapAccess() {
+  try {
+    const response = await fetch('/api/access/status', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const status = await response.json();
+    siteAccessGranted = status.required !== true || status.authenticated === true;
+    if (!siteAccessGranted) {
+      openAccess();
+      return false;
+    }
+    closeAccess();
+    return true;
+  } catch {
+    openAccess('暂时无法验证访问状态，请刷新页面后重试。');
+    return false;
+  }
 }
 
 function openTerms() {
@@ -765,10 +915,90 @@ document.getElementById('accept-terms').addEventListener('click', () => {
   closeTerms();
   startApp();
 });
+document.getElementById('access-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = document.getElementById('access-passphrase');
+  const button = document.getElementById('access-submit');
+  const error = document.getElementById('access-error');
+  if (!input.value.trim()) {
+    error.textContent = '请输入暗号。';
+    input.focus();
+    return;
+  }
+  button.disabled = true;
+  error.textContent = '正在验证…';
+  try {
+    await requestJson('/api/access/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passphrase: input.value }),
+    });
+    input.value = '';
+    siteAccessGranted = true;
+    closeAccess();
+    continueAfterAccess();
+  } catch (err) {
+    error.textContent = err.message || '暗号不正确。';
+    input.select();
+  } finally {
+    button.disabled = false;
+  }
+});
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !document.getElementById('consent-overlay').hidden) {
     event.preventDefault();
     closeTerms();
+  }
+  if (event.key === 'Escape' && !document.getElementById('report-overlay').hidden) {
+    event.preventDefault();
+    closeReport();
+  }
+});
+
+function openReport(item) {
+  reportingSource = item;
+  document.getElementById('report-source').textContent = `${item.name} · ${item.websiteUrl}`;
+  document.getElementById('report-details').value = '';
+  document.getElementById('report-status').textContent = '';
+  document.getElementById('report-overlay').hidden = false;
+  document.querySelector('.page-shell').inert = true;
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(() => document.getElementById('report-title').focus());
+}
+
+function closeReport() {
+  document.getElementById('report-overlay').hidden = true;
+  document.querySelector('.page-shell').inert = false;
+  document.body.style.overflow = '';
+  reportingSource = null;
+}
+
+document.getElementById('report-cancel').addEventListener('click', closeReport);
+document.getElementById('report-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!reportingSource) return;
+  const button = document.getElementById('report-submit');
+  const status = document.getElementById('report-status');
+  const reason = document.getElementById('report-reason').value;
+  const details = document.getElementById('report-details').value.trim();
+  if (reason === 'other' && !details) {
+    status.textContent = '选择“其他问题”时请填写补充说明。';
+    return;
+  }
+  button.disabled = true;
+  status.textContent = '正在提交…';
+  try {
+    const result = await requestJson(`/api/sources/${encodeURIComponent(reportingSource.id)}/reports`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, details }),
+    });
+    status.textContent = result.alreadyReported ? '你已经举报过这个书源，管理员会统一处理。' : '举报已提交，感谢反馈。';
+    setTimeout(closeReport, 900);
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -885,6 +1115,7 @@ function renderSources(items) {
           <button class="vote" data-vote="${escapeHtml(item.id)}" ${alreadyVoted ? 'disabled' : ''}>
             ${alreadyVoted ? '已赞' : '顶一下'}
           </button>
+          <button class="ghost" data-report="${escapeHtml(item.id)}">举报</button>
         </div>
       </div>
     `;
@@ -925,10 +1156,21 @@ function renderSources(items) {
       }
     });
   });
+  el.querySelectorAll('[data-report]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const item = cachedItems.find((entry) => entry.id === btn.dataset.report);
+      if (item) openReport(item);
+    });
+  });
 }
 
 async function fetchSources() {
   const res = await fetch(`/api/sources?sort=${encodeURIComponent(currentSort)}`);
+  if (res.status === 401) {
+    siteAccessGranted = false;
+    openAccess('暗号已更新，请输入新的暗号。');
+    return;
+  }
   const data = await res.json();
   cachedItems = data.items || [];
   cachedSummary = data.summary || null;
@@ -966,6 +1208,10 @@ async function requestJson(url, options = {}) {
   let data = null;
   try { data = await res.json(); } catch { /* A useful HTTP status is still available below. */ }
   if (!res.ok) {
+    if (res.status === 401 && data?.error?.code === 'ACCESS_REQUIRED') {
+      siteAccessGranted = false;
+      openAccess('暗号已更新，请输入新的暗号。');
+    }
     const error = new Error(data?.error?.message || `请求失败（HTTP ${res.status}）`);
     error.status = res.status;
     throw error;
@@ -1382,14 +1628,12 @@ document.getElementById('convert-btn').addEventListener('click', async () => {
   }
 });
 
-termsAccepted = hasCurrentTermsAcceptance();
-setConverterEnabled(termsAccepted);
-if (termsAccepted) {
-  closeTerms();
-  startApp();
-} else {
-  openTerms();
+async function bootstrap() {
+  const granted = await bootstrapAccess();
+  if (granted) continueAfterAccess();
 }
+
+bootstrap();
 </script>
 </body>
 </html>

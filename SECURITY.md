@@ -20,3 +20,10 @@ ORSP Converter deliberately does not execute embedded JavaScript/Java rules,
 interactive login flows, CAPTCHA solvers, or browser-challenge bypasses. It
 also rejects private-network fetch targets and constrains proxied cover assets
 to the source origin.
+
+Normal reader and voter metrics store keyed HMAC identifiers rather than raw
+IP addresses. Raw IP addresses are retained only for abuse handling: source
+reports, failed site-passphrase attempts, failed administrator recovery-password
+attempts, and explicit administrator-managed IP bans. These records live under
+the deployment data directory and should be protected, retained only as long as
+operationally necessary, and never committed to the repository.

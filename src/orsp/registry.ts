@@ -49,6 +49,12 @@ export interface StoredSource {
   coverAssets?: Record<string, string>;
   /** Last bounded adapter audit. Only passed records enter the public catalogue. */
   health?: SourceHealth;
+  /** Manual moderation affects only public leaderboard discovery, not direct ORSP access. */
+  moderation?: {
+    hiddenFromLeaderboard: boolean;
+    hiddenAt?: string;
+    hiddenBy?: string;
+  };
   stats: SourceStats;
 }
 
@@ -164,7 +170,7 @@ export class SourceRegistry {
   }
 
   listVerifiedRanked(sort: RankSort = 'usage'): StoredSource[] {
-    return this.listRanked(sort).filter((record) => record.health?.status === 'parse_passed');
+    return this.listRanked(sort).filter((record) => this.isPublicLeaderboardSource(record));
   }
 
   get(id: string): StoredSource | undefined {
@@ -304,11 +310,34 @@ export class SourceRegistry {
     if (!this.sources.has(id)) return false;
     this.sources.delete(id);
     if (this.dataDir !== null) {
+      const sourcePath = path.join(this.dataDir, `${id}.json`);
+      const healthPath = this.healthPath(id);
+      const pending = [this.writeQueues.get(sourcePath), this.writeQueues.get(healthPath)].filter(
+        (write): write is Promise<void> => Boolean(write),
+      );
+      if (pending.length > 0) await Promise.allSettled(pending);
       await Promise.all([
-        rm(path.join(this.dataDir, `${id}.json`), { force: true }),
-        rm(this.healthPath(id), { force: true }),
+        rm(sourcePath, { force: true }),
+        rm(healthPath, { force: true }),
       ]);
     }
+    return true;
+  }
+
+  /** Hides or restores a verified source in the public leaderboard without disabling its ORSP routes. */
+  async setLeaderboardHidden(id: string, hidden: boolean, actor: string): Promise<boolean> {
+    const record = this.sources.get(id);
+    if (!record) return false;
+    if (hidden) {
+      record.moderation = {
+        hiddenFromLeaderboard: true,
+        hiddenAt: new Date().toISOString(),
+        hiddenBy: actor,
+      };
+    } else {
+      delete record.moderation;
+    }
+    await this.persist(record);
     return true;
   }
 
@@ -380,7 +409,9 @@ export class SourceRegistry {
     const readerKeys = new Set<string>();
     let totalVotes = 0;
     let totalConverts = 0;
-    const sources = verifiedOnly ? [...this.sources.values()].filter((source) => source.health?.status === 'parse_passed') : this.sources.values();
+    const sources = verifiedOnly
+      ? [...this.sources.values()].filter((source) => this.isPublicLeaderboardSource(source))
+      : this.sources.values();
     for (const s of sources) {
       totalReads += s.stats.readCount;
       s.stats.readerKeys.forEach((key) => readerKeys.add(key));
@@ -388,7 +419,9 @@ export class SourceRegistry {
       totalConverts += s.stats.convertRequests;
     }
     return {
-      sourceCount: verifiedOnly ? [...this.sources.values()].filter((source) => source.health?.status === 'parse_passed').length : this.sources.size,
+      sourceCount: verifiedOnly
+        ? [...this.sources.values()].filter((source) => this.isPublicLeaderboardSource(source)).length
+        : this.sources.size,
       totalReads,
       recentUniqueReaders: readerKeys.size,
       totalVotes,
@@ -398,7 +431,12 @@ export class SourceRegistry {
 
   private async persist(record: StoredSource): Promise<void> {
     if (this.dataDir === null) return;
+    if (this.sources.get(record.id) !== record) return;
     await this.writeJson(path.join(this.dataDir, `${record.id}.json`), record);
+  }
+
+  private isPublicLeaderboardSource(record: StoredSource): boolean {
+    return record.health?.status === 'parse_passed' && record.moderation?.hiddenFromLeaderboard !== true;
   }
 
   private healthPath(id: string): string {

@@ -32,6 +32,29 @@ describe('public ORSP converter UI', () => {
     expect(html).toContain('rightsConfirmed: true');
   });
 
+  it('requires the internal site passphrase before opening the terms dialog', async () => {
+    const html = await readFile(publicIndexPath, 'utf8');
+
+    expect(html).toContain('id="access-overlay"');
+    expect(html).toContain('本网站仅供内部学习交流使用');
+    expect(html).toContain('请输入暗号');
+    expect(html).toContain("requestJson('/api/access/unlock'");
+    expect(html).toContain('async function bootstrapAccess()');
+    expect(html).toContain('await bootstrapAccess();');
+    expect(html.indexOf('id="access-overlay"')).toBeLessThan(html.indexOf('id="consent-overlay"'));
+  });
+
+  it('lets an authenticated visitor report a ranked source with a reason', async () => {
+    const html = await readFile(publicIndexPath, 'utf8');
+
+    expect(html).toContain('data-report=');
+    expect(html).toContain('id="report-overlay"');
+    expect(html).toContain('举报这个书源');
+    expect(html).toContain('/reports`');
+    expect(html).toContain('疑似侵权');
+    expect(html).toContain('无法使用');
+  });
+
   it('uploads collection files through bounded asynchronous conversion jobs', async () => {
     const html = await readFile(publicIndexPath, 'utf8');
 

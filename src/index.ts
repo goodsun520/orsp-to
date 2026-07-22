@@ -2,6 +2,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './orsp/server.js';
 import { SourceRegistry } from './orsp/registry.js';
+import { SiteAccessControl } from './orsp/siteAccess.js';
+import { SourceReportStore } from './orsp/sourceReports.js';
+import { IpSecurityStore } from './orsp/ipSecurity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -9,6 +12,12 @@ const port = Number.parseInt(process.env.PORT ?? '8790', 10);
 const publicOrigin = process.env.PUBLIC_ORIGIN ?? `http://127.0.0.1:${port}`;
 const dataDir = process.env.DATA_DIR ?? path.join(__dirname, '..', 'data', 'sources');
 const adminPassword = process.env.ADMIN_PASSWORD ?? '';
+const githubClientId = process.env.GITHUB_OAUTH_CLIENT_ID?.trim();
+const githubClientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET?.trim();
+const githubAdminLogins = (process.env.GITHUB_ADMIN_LOGINS ?? '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 const statsHashKey = process.env.STATS_HASH_KEY;
 
 function positiveEnv(name: string): number | undefined {
@@ -17,14 +26,26 @@ function positiveEnv(name: string): number | undefined {
 }
 
 async function main() {
-  if (!adminPassword) {
-    console.warn('ADMIN_PASSWORD not set — /admin is disabled (all admin logins will fail).');
+  if (!githubClientId || !githubClientSecret) {
+    console.warn('GitHub OAuth is not configured — set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET.');
+  }
+  if (!adminPassword && (!githubClientId || !githubClientSecret)) {
+    console.warn('No admin login method is configured — /admin.html cannot be used.');
   }
   if (!statsHashKey) {
     console.warn('STATS_HASH_KEY not set — use a stable secret in production before collecting reader metrics.');
   }
   const registry = new SourceRegistry(dataDir, statsHashKey);
   await registry.load();
+  const siteAccess = new SiteAccessControl(registry.runtimePath('.admin/site-access.json'));
+  await siteAccess.load();
+  const sourceReports = new SourceReportStore(
+    registry.runtimePath('.admin/source-reports.json'),
+    statsHashKey || 'development-only-report-key',
+  );
+  await sourceReports.load();
+  const ipSecurity = new IpSecurityStore(registry.runtimePath('.admin/ip-security.json'));
+  await ipSecurity.load();
   const cacheFreshHours = positiveEnv('COVER_CACHE_FRESH_HOURS');
   const cacheStaleHours = positiveEnv('COVER_CACHE_STALE_HOURS');
   const cacheMaxMb = positiveEnv('COVER_CACHE_MAX_MB');
@@ -35,6 +56,13 @@ async function main() {
     cacheFreshMs: cacheFreshHours === undefined ? undefined : cacheFreshHours * 60 * 60 * 1_000,
     cacheStaleMs: cacheStaleHours === undefined ? undefined : cacheStaleHours * 60 * 60 * 1_000,
     cacheMaxBytes: cacheMaxMb === undefined ? undefined : cacheMaxMb * 1024 * 1024,
+  }, {
+    githubClientId,
+    githubClientSecret,
+    githubAdminLogins,
+    siteAccess,
+    sourceReports,
+    ipSecurity,
   });
   app.listen(port, '127.0.0.1', () => {
     console.log(`orsp-converter listening on http://127.0.0.1:${port}`);

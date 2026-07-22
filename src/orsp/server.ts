@@ -19,12 +19,22 @@ import {
 } from '../legado/fetchSource.js';
 import { CoverResponseCache } from './coverCache.js';
 import { cookieScopeKey, jarForSource } from '../legado/cookieJar.js';
-import { AdminAuth, ADMIN_SESSION_COOKIE, readSessionCookie } from './adminAuth.js';
+import {
+  AdminAuth,
+  AdminAuthError,
+  ADMIN_OAUTH_STATE_COOKIE,
+  ADMIN_SESSION_COOKIE,
+  readOAuthStateCookie,
+  readSessionCookie,
+} from './adminAuth.js';
 import { RateLimiter, clientIp } from './rateLimit.js';
 import { auditLegadoSource } from './sourceAudit.js';
 import { SourceRuntime, SourceRuntimeError } from './sourceRuntime.js';
 import { assessSourceCompatibility } from './sourceCompatibility.js';
 import { converterTermsVersion } from './protocol.js';
+import { SiteAccessControl, SITE_ACCESS_COOKIE, readSiteAccessCookie } from './siteAccess.js';
+import { SourceReportStore, type SourceReportReason } from './sourceReports.js';
+import { IpSecurityStore, isBannableIp } from './ipSecurity.js';
 import {
   ConversionJobError,
   ConversionJobManager,
@@ -81,9 +91,26 @@ export interface CoverProxyOptions {
   allowPrivateAddressesForTesting?: boolean;
 }
 
+export interface AdminPanelOptions {
+  githubClientId?: string;
+  githubClientSecret?: string;
+  githubAdminLogins?: string[];
+  githubFetchImpl?: typeof fetch;
+  siteAccess?: SiteAccessControl;
+  sourceReports?: SourceReportStore;
+  ipSecurity?: IpSecurityStore;
+}
+
 function parseSort(raw: unknown): RankSort {
   if (raw === 'votes' || raw === 'converts' || raw === 'newest' || raw === 'usage') return raw;
   return 'usage';
+}
+
+function parseReportReason(value: unknown): SourceReportReason | null {
+  if (value === 'infringement' || value === 'unavailable' || value === 'malicious' || value === 'other') {
+    return value;
+  }
+  return null;
 }
 
 export function createApp(
@@ -91,13 +118,26 @@ export function createApp(
   publicOrigin: string,
   adminPassword = '',
   coverProxyOptions: CoverProxyOptions = {},
+  adminPanelOptions: AdminPanelOptions = {},
 ) {
   const app = express();
-  const adminAuth = new AdminAuth(adminPassword);
+  const githubConfigured = Boolean(adminPanelOptions.githubClientId && adminPanelOptions.githubClientSecret);
+  const adminAuth = new AdminAuth(adminPassword, githubConfigured ? {
+    clientId: adminPanelOptions.githubClientId!,
+    clientSecret: adminPanelOptions.githubClientSecret!,
+    callbackUrl: new URL('/api/admin/github/callback', publicOrigin).toString(),
+    allowedLogins: [...new Set(['miloquinn', ...(adminPanelOptions.githubAdminLogins ?? [])])],
+    fetchImpl: adminPanelOptions.githubFetchImpl,
+  } : undefined);
+  const siteAccess = adminPanelOptions.siteAccess ?? SiteAccessControl.ephemeral();
+  const sourceReports = adminPanelOptions.sourceReports ?? SourceReportStore.ephemeral();
+  const ipSecurity = adminPanelOptions.ipSecurity ?? IpSecurityStore.ephemeral();
   const convertLimiter = new RateLimiter(60_000, 10);
   const conversionChunkLimiter = new RateLimiter(60_000, 120);
   const voteLimiter = new RateLimiter(60_000, 30);
   const loginLimiter = new RateLimiter(60_000, 5);
+  const accessLimiter = new RateLimiter(60_000, 10);
+  const reportLimiter = new RateLimiter(60_000, 5);
   const runtime = new SourceRuntime(registry, publicOrigin);
   const conversionJobs = new ConversionJobManager(async (entry) => {
     const outcome = await convertLegadoSource(entry, registry, publicOrigin);
@@ -119,6 +159,13 @@ export function createApp(
 
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // behind our own nginx reverse proxy: trust X-Forwarded-* for IP + req.secure
+  app.use((req, res, next) => {
+    if (ipSecurity.isBanned(clientIp(req))) {
+      sendError(res, 403, 'IP_BANNED', 'This IP address has been blocked by the administrator.');
+      return;
+    }
+    next();
+  });
   app.use(express.json({ limit: '2mb' }));
 
   app.use((_req, res, next) => {
@@ -147,6 +194,23 @@ export function createApp(
     next();
   }
 
+  function requireSiteAccess(req: Request, res: Response, next: () => void) {
+    if (!siteAccess.isSessionValid(readSiteAccessCookie(req.headers.cookie))) {
+      sendError(res, 401, 'ACCESS_REQUIRED', 'Enter the current site passphrase to continue.');
+      return;
+    }
+    next();
+  }
+
+  function setAdminSessionCookie(req: Request, res: Response, token: string): void {
+    res.cookie(ADMIN_SESSION_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: req.secure,
+      maxAge: 12 * 60 * 60 * 1000,
+    });
+  }
+
   function isHealthCheck(req: Request): boolean {
     return req.get('X-Open-Reading-Request-Purpose')?.toLowerCase() === 'health-check';
   }
@@ -154,6 +218,40 @@ export function createApp(
   function recordSuccessfulRead(req: Request, id: string): void {
     if (!isHealthCheck(req)) registry.recordRead(id, clientIp(req));
   }
+
+  app.get('/api/access/status', (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store').json({
+      required: siteAccess.isConfigured(),
+      authenticated: siteAccess.isSessionValid(readSiteAccessCookie(req.headers.cookie)),
+    });
+  });
+
+  app.post('/api/access/unlock', async (req: Request, res: Response) => {
+    if (!accessLimiter.check(clientIp(req))) {
+      sendError(res, 429, 'RATE_LIMITED', 'Too many passphrase attempts, try again in a minute.', true);
+      return;
+    }
+    if (!siteAccess.isConfigured()) {
+      res.json({ ok: true });
+      return;
+    }
+    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase : '';
+    const token = siteAccess.unlock(passphrase);
+    if (!token) {
+      await ipSecurity.recordEvent(clientIp(req), 'invalid_passphrase', '网站暗号验证失败');
+      sendError(res, 401, 'INVALID_PASSPHRASE', '暗号不正确。');
+      return;
+    }
+    res.cookie(SITE_ACCESS_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: req.secure,
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    res.json({ ok: true });
+  });
+
+  app.use(['/api/sources', '/api/convert', '/api/conversion-jobs'], requireSiteAccess);
 
   // ---- Public source list / convert / vote / stats ----
 
@@ -336,19 +434,121 @@ export function createApp(
     res.json({ votes, alreadyVoted: false });
   });
 
-  // Deleting a shared entry is admin-only (ops cleanup). Viewing stats is fully public.
-  app.delete('/api/sources/:id', requireAdmin, async (req: Request, res: Response) => {
+  app.post('/api/sources/:id/reports', async (req: Request, res: Response) => {
+    const ip = clientIp(req);
+    if (!reportLimiter.check(ip)) {
+      sendError(res, 429, 'RATE_LIMITED', 'Too many reports, try again in a minute.', true);
+      return;
+    }
+    const record = registry.get(req.params.id);
+    if (!record || record.health?.status !== 'parse_passed') {
+      notFound(res, 'Unknown or unverified source id');
+      return;
+    }
+    const reason = parseReportReason(req.body?.reason);
+    if (!reason) {
+      invalidParameter(res, 'reason must be infringement, unavailable, malicious, or other');
+      return;
+    }
+    const details = typeof req.body?.details === 'string' ? req.body.details.trim() : '';
+    if (Array.from(details).length > 500) {
+      invalidParameter(res, 'details must be at most 500 characters');
+      return;
+    }
+    if (reason === 'other' && !details) {
+      invalidParameter(res, 'details are required when reason is other');
+      return;
+    }
+    try {
+      const result = await sourceReports.create({
+        sourceId: record.id,
+        sourceName: record.legado.bookSourceName,
+        websiteUrl: record.legado.bookSourceUrl,
+        reason,
+        details,
+      }, ip);
+      if (result.created) {
+        await ipSecurity.recordEvent(ip, 'source_report', `举报书源 ${record.id}`);
+      }
+      res.status(result.created ? 201 : 200).json({
+        ok: true,
+        alreadyReported: !result.created,
+        reportId: result.report.id,
+      });
+    } catch (error) {
+      handleRouteError(res, error);
+    }
+  });
+
+  async function deleteSource(req: Request, res: Response): Promise<void> {
     const removed = await registry.remove(req.params.id);
     if (!removed) {
       notFound(res, 'Unknown source id');
       return;
     }
     res.status(204).end();
+  }
+
+  // Backwards-compatible admin-only delete path. New dashboard calls the admin namespace below.
+  app.delete('/api/sources/:id', requireAdmin, deleteSource);
+
+  // ---- Admin moderation ----
+
+  app.use('/api/admin', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
   });
 
-  // ---- Admin (delete-only ops; dashboard data is public on the front page) ----
+  app.get('/api/admin/github/start', (req: Request, res: Response) => {
+    if (!loginLimiter.check(clientIp(req))) {
+      sendError(res, 429, 'RATE_LIMITED', 'Too many login attempts, try again in a minute.', true);
+      return;
+    }
+    try {
+      const attempt = adminAuth.beginGitHubLogin();
+      res.cookie(ADMIN_OAUTH_STATE_COOKIE, attempt.state, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: req.secure,
+        maxAge: 10 * 60 * 1000,
+        path: '/api/admin/github',
+      });
+      res.redirect(302, attempt.authorizationUrl);
+    } catch (error) {
+      if (error instanceof AdminAuthError && error.code === 'GITHUB_OAUTH_DISABLED') {
+        res.redirect(303, '/admin.html?login=not-configured');
+        return;
+      }
+      handleRouteError(res, error);
+    }
+  });
 
-  app.post('/api/admin/login', (req: Request, res: Response) => {
+  app.get('/api/admin/github/callback', async (req: Request, res: Response) => {
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    try {
+      const session = await adminAuth.completeGitHubLogin(
+        code,
+        state,
+        readOAuthStateCookie(req.headers.cookie),
+      );
+      setAdminSessionCookie(req, res, session.token);
+      res.clearCookie(ADMIN_OAUTH_STATE_COOKIE, { path: '/api/admin/github' });
+      res.redirect(303, '/admin.html?login=success');
+    } catch (error) {
+      res.clearCookie(ADMIN_OAUTH_STATE_COOKIE, { path: '/api/admin/github' });
+      if (error instanceof AdminAuthError) {
+        const result = error.code === 'GITHUB_USER_FORBIDDEN' ? 'forbidden' : 'error';
+        res.redirect(303, `/admin.html?login=${result}`);
+        return;
+      }
+      console.error(error);
+      res.redirect(303, '/admin.html?login=error');
+    }
+  });
+
+  // Password login remains as a local recovery path for existing deployments.
+  app.post('/api/admin/login', async (req: Request, res: Response) => {
     const ip = clientIp(req);
     if (!loginLimiter.check(ip)) {
       sendError(res, 429, 'RATE_LIMITED', 'Too many login attempts, try again in a minute.', true);
@@ -357,15 +557,11 @@ export function createApp(
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const token = adminAuth.login(password);
     if (!token) {
+      await ipSecurity.recordEvent(ip, 'invalid_admin_password', '管理员恢复密码登录失败');
       sendUnauthorized(res);
       return;
     }
-    res.cookie(ADMIN_SESSION_COOKIE, token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: req.secure,
-      maxAge: 12 * 60 * 60 * 1000,
-    });
+    setAdminSessionCookie(req, res, token);
     res.json({ ok: true });
   });
 
@@ -376,13 +572,127 @@ export function createApp(
   });
 
   app.get('/api/admin/whoami', (req: Request, res: Response) => {
-    res.json({ authenticated: adminAuth.isValid(readSessionCookie(req.headers.cookie)) });
+    const identity = adminAuth.current(readSessionCookie(req.headers.cookie));
+    res.json({
+      authenticated: identity !== null,
+      githubConfigured: adminAuth.githubConfigured(),
+      user: identity,
+    });
   });
 
   app.get('/api/admin/sources', requireAdmin, async (_req: Request, res: Response) => {
     await registry.reloadHealthFromDisk();
-    // Same payload as public list — kept so the optional /admin.html delete UI still works.
-    res.json({ items: registry.list().map((record) => publicSourceDetail(record, publicOrigin)) });
+    res.json({ items: registry.list().map((record) => adminSourceDetail(record, publicOrigin)) });
+  });
+
+  app.get('/api/admin/access', requireAdmin, (_req: Request, res: Response) => {
+    res.json(siteAccess.status());
+  });
+
+  app.post('/api/admin/access', requireAdmin, async (req: Request, res: Response) => {
+    if (typeof req.body?.passphrase !== 'string') {
+      invalidParameter(res, 'passphrase must be a string');
+      return;
+    }
+    const identity = adminAuth.current(readSessionCookie(req.headers.cookie));
+    try {
+      await siteAccess.setPassphrase(req.body.passphrase, identity?.login ?? 'admin');
+      res.json(siteAccess.status());
+    } catch (error) {
+      invalidParameter(res, error instanceof Error ? error.message : 'Invalid passphrase');
+    }
+  });
+
+  app.post('/api/admin/sources/:id/visibility', requireAdmin, async (req: Request, res: Response) => {
+    if (typeof req.body?.hidden !== 'boolean') {
+      invalidParameter(res, 'hidden must be a boolean');
+      return;
+    }
+    const identity = adminAuth.current(readSessionCookie(req.headers.cookie));
+    const updated = await registry.setLeaderboardHidden(req.params.id, req.body.hidden, identity?.login ?? 'admin');
+    if (!updated) {
+      notFound(res, 'Unknown source id');
+      return;
+    }
+    res.json(adminSourceDetail(registry.get(req.params.id)!, publicOrigin));
+  });
+
+  app.delete('/api/admin/sources/:id', requireAdmin, deleteSource);
+
+  app.get('/api/admin/reports', requireAdmin, (_req: Request, res: Response) => {
+    res.json({
+      items: sourceReports.list().map((report) => adminReportDetail(report, registry)),
+    });
+  });
+
+  app.post('/api/admin/reports/:id/resolve', requireAdmin, async (req: Request, res: Response) => {
+    const action = req.body?.action;
+    if (action !== 'hide' && action !== 'ignore') {
+      invalidParameter(res, 'action must be hide or ignore');
+      return;
+    }
+    const report = sourceReports.get(req.params.id);
+    if (!report) {
+      notFound(res, 'Unknown report id');
+      return;
+    }
+    if (report.status !== 'open') {
+      sendError(res, 409, 'REPORT_ALREADY_RESOLVED', 'This report has already been resolved.');
+      return;
+    }
+    const identity = adminAuth.current(readSessionCookie(req.headers.cookie));
+    const actor = identity?.login ?? 'admin';
+    try {
+      if (action === 'hide') {
+        const hidden = await registry.setLeaderboardHidden(report.sourceId, true, actor);
+        if (!hidden) {
+          notFound(res, 'The reported source no longer exists');
+          return;
+        }
+        await sourceReports.resolveOpenForSource(report.sourceId, 'hidden', actor);
+      } else {
+        await sourceReports.resolve(report.id, 'ignored', actor);
+      }
+      res.json(adminReportDetail(sourceReports.get(report.id)!, registry));
+    } catch (error) {
+      handleRouteError(res, error);
+    }
+  });
+
+  app.get('/api/admin/security', requireAdmin, (req: Request, res: Response) => {
+    res.json({
+      currentIp: clientIp(req),
+      events: ipSecurity.listEvents(),
+      bans: ipSecurity.listBans(),
+    });
+  });
+
+  app.post('/api/admin/security/bans', requireAdmin, async (req: Request, res: Response) => {
+    const ip = typeof req.body?.ip === 'string' ? req.body.ip.trim() : '';
+    if (!isBannableIp(ip)) {
+      invalidParameter(res, 'ip must be a valid IPv4 or IPv6 address');
+      return;
+    }
+    if (ip === clientIp(req)) {
+      sendError(res, 409, 'CANNOT_BAN_CURRENT_IP', 'You cannot ban the IP used by your current admin session.');
+      return;
+    }
+    const identity = adminAuth.current(readSessionCookie(req.headers.cookie));
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
+    try {
+      res.json(await ipSecurity.ban(ip, identity?.login ?? 'admin', reason));
+    } catch (error) {
+      invalidParameter(res, error instanceof Error ? error.message : 'Invalid IP ban');
+    }
+  });
+
+  app.post('/api/admin/security/unban', requireAdmin, async (req: Request, res: Response) => {
+    const ip = typeof req.body?.ip === 'string' ? req.body.ip.trim() : '';
+    if (!await ipSecurity.unban(ip)) {
+      notFound(res, 'IP ban not found');
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // ---- Per-source ORSP endpoints ----
@@ -579,6 +889,25 @@ function publicSourceDetail(record: StoredSource, origin: string) {
     readCount: record.stats.readCount,
     convertRequests: record.stats.convertRequests,
     recentUniqueReaders: record.stats.readerKeys.length,
+  };
+}
+
+function adminSourceDetail(record: StoredSource, origin: string) {
+  return {
+    ...publicSourceDetail(record, origin),
+    hiddenFromLeaderboard: record.moderation?.hiddenFromLeaderboard === true,
+    hiddenAt: record.moderation?.hiddenAt,
+    hiddenBy: record.moderation?.hiddenBy,
+  };
+}
+
+function adminReportDetail(report: ReturnType<SourceReportStore['list']>[number], registry: SourceRegistry) {
+  const { reporterKey: _reporterKey, ...visible } = report;
+  const source = registry.get(report.sourceId);
+  return {
+    ...visible,
+    sourceExists: source !== undefined,
+    sourceHidden: source?.moderation?.hiddenFromLeaderboard === true,
   };
 }
 

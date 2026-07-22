@@ -82,6 +82,33 @@ describe('SourceRegistry', () => {
     expect(registry.globalSummary(true).sourceCount).toBe(1);
   });
 
+  it('persists reversible leaderboard moderation without disabling the source', async () => {
+    const { record } = await registry.add(minimalSource('https://hidden.example/'));
+    await registry.setHealth(record.id, {
+      checkedAt: '2026-07-22T00:00:00.000Z',
+      status: 'parse_passed',
+    });
+    registry.recordRead(record.id, '8.8.8.8');
+    await registry.flushPendingWrites();
+
+    expect(await registry.setLeaderboardHidden(record.id, true, 'miloquinn')).toBe(true);
+    expect(registry.get(record.id)).toBeDefined();
+    expect(registry.listVerifiedRanked()).toHaveLength(0);
+    expect(registry.globalSummary(true)).toMatchObject({ sourceCount: 0, totalReads: 0 });
+
+    const restarted = new SourceRegistry(dataDir);
+    await restarted.load();
+    expect(restarted.get(record.id)?.moderation).toMatchObject({
+      hiddenFromLeaderboard: true,
+      hiddenBy: 'miloquinn',
+    });
+    expect(restarted.listVerifiedRanked()).toHaveLength(0);
+
+    expect(await restarted.setLeaderboardHidden(record.id, false, 'miloquinn')).toBe(true);
+    expect(restarted.listVerifiedRanked().map((source) => source.id)).toEqual([record.id]);
+    expect(restarted.globalSummary(true)).toMatchObject({ sourceCount: 1, totalReads: 1 });
+  });
+
   it('one vote per IP', async () => {
     const { record } = await registry.add(minimalSource('https://v.example/'));
     expect(await registry.vote(record.id, '10.0.0.1')).toBe(1);
@@ -149,6 +176,22 @@ describe('SourceRegistry', () => {
     await restarted.load();
     expect(restarted.get(record.id)?.health?.status).toBe('parse_failed');
     expect(restarted.get(record.id)?.stats.readCount).toBe(1);
+  });
+
+  it('does not let queued statistic writes recreate a permanently deleted source', async () => {
+    const { record } = await registry.add(minimalSource('https://deleted.example/'));
+    await registry.setHealth(record.id, {
+      checkedAt: '2026-07-22T00:00:00.000Z',
+      status: 'parse_passed',
+    });
+
+    registry.recordRead(record.id, '8.8.8.8');
+    expect(await registry.remove(record.id)).toBe(true);
+    await registry.flushPendingWrites();
+
+    const restarted = new SourceRegistry(dataDir);
+    await restarted.load();
+    expect(restarted.get(record.id)).toBeUndefined();
   });
 
   it('recomputes compatibility metadata when loading legacy records', async () => {
