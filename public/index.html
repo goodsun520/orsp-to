@@ -575,6 +575,7 @@
               <div class="batch-count"><strong id="batch-total">0</strong><span>总数</span></div>
               <div class="batch-count"><strong id="batch-pending">0</strong><span>待处理 / 处理中</span></div>
               <div class="batch-count"><strong id="batch-succeeded">0</strong><span>成功</span></div>
+              <div class="batch-count"><strong id="batch-skipped">0</strong><span>跳过</span></div>
               <div class="batch-count"><strong id="batch-failed">0</strong><span>失败</span></div>
             </div>
             <div id="batch-actions" class="row batch-actions"></div>
@@ -983,6 +984,10 @@ function batchItemFailed(item) {
   return ['failed', 'error'].includes(item?.status);
 }
 
+function batchItemSkipped(item) {
+  return item?.status === 'skipped';
+}
+
 function batchResult(item) {
   return item?.result || item?.converted || (item?.discoveryUrl ? item : null);
 }
@@ -1002,13 +1007,15 @@ function normalizeBatchSnapshot(data) {
   const items = Array.isArray(data?.items) ? data.items : [];
   const expectedTotal = Number(data?.expectedTotal ?? data?.progress?.expectedTotal ?? data?.progress?.total ?? items.length) || 0;
   const succeeded = Number(data?.progress?.succeeded ?? items.filter(batchItemSucceeded).length) || 0;
+  const skipped = Number(data?.progress?.skipped ?? items.filter(batchItemSkipped).length) || 0;
   const failed = Number(data?.progress?.failed ?? items.filter(batchItemFailed).length) || 0;
-  const terminalCount = succeeded + failed;
+  const terminalCount = succeeded + skipped + failed;
   return {
     ...data,
     items,
     expectedTotal,
     succeeded,
+    skipped,
     failed,
     pending: Math.max(0, expectedTotal - terminalCount),
     terminalCount,
@@ -1022,6 +1029,16 @@ function isTerminalJob(status) {
 function groupBatchFailures(items) {
   const groups = new Map();
   for (const item of items.filter(batchItemFailed)) {
+    const message = batchErrorText(item);
+    if (!groups.has(message)) groups.set(message, []);
+    groups.get(message).push(batchSourceName(item));
+  }
+  return groups;
+}
+
+function groupBatchSkips(items) {
+  const groups = new Map();
+  for (const item of items.filter(batchItemSkipped)) {
     const message = batchErrorText(item);
     if (!groups.has(message)) groups.set(message, []);
     groups.get(message).push(batchSourceName(item));
@@ -1044,7 +1061,7 @@ function batchExportRows(snapshot) {
       name: batchSourceName(item),
       discoveryUrl: result?.discoveryUrl || '',
       alreadyExisted: result?.alreadyExisted ?? '',
-      error: batchItemFailed(item) ? batchErrorText(item) : '',
+      error: batchItemFailed(item) || batchItemSkipped(item) ? batchErrorText(item) : '',
     };
   });
 }
@@ -1068,6 +1085,7 @@ function renderBatchSnapshot(raw) {
   document.getElementById('batch-total').textContent = snapshot.expectedTotal;
   document.getElementById('batch-pending').textContent = snapshot.pending;
   document.getElementById('batch-succeeded').textContent = snapshot.succeeded;
+  document.getElementById('batch-skipped').textContent = snapshot.skipped;
   document.getElementById('batch-failed').textContent = snapshot.failed;
   const percent = snapshot.expectedTotal ? Math.round((snapshot.terminalCount / snapshot.expectedTotal) * 100) : 0;
   const progressTrack = panel.querySelector('[role="progressbar"]');
@@ -1104,6 +1122,14 @@ function renderBatchSnapshot(raw) {
   if (failureGroups.size) {
     html += '<div class="failure-groups"><h3>失败项目</h3>';
     for (const [message, names] of failureGroups) {
+      html += `<details class="failure-group"><summary>${escapeHtml(message)}（${names.length}）</summary><ul>${names.map((name) => `<li>${escapeHtml(name)}</li>`).join('')}</ul></details>`;
+    }
+    html += '</div>';
+  }
+  const skipGroups = groupBatchSkips(snapshot.items);
+  if (skipGroups.size) {
+    html += '<div class="failure-groups"><h3>跳过项目（不计为失败）</h3>';
+    for (const [message, names] of skipGroups) {
       html += `<details class="failure-group"><summary>${escapeHtml(message)}（${names.length}）</summary><ul>${names.map((name) => `<li>${escapeHtml(name)}</li>`).join('')}</ul></details>`;
     }
     html += '</div>';
@@ -1267,10 +1293,11 @@ async function convertSingle(body) {
     body: JSON.stringify({ ...body, ...consentPayload() }),
   });
   const converted = data.converted || [];
+  const skipped = data.skipped || [];
   const errors = data.errors || [];
   const items = Array.isArray(data.items) ? data.items : [];
   const reused = converted.filter((c) => c.alreadyExisted).length;
-  status.textContent = `完成：新转换 ${converted.length - reused} 个，已存在复用 ${reused} 个，失败 ${errors.length} 个。`;
+  status.textContent = `完成：新转换 ${converted.length - reused} 个，已存在复用 ${reused} 个，跳过 ${skipped.length} 个，失败 ${errors.length} 个。`;
   let html = '';
   if (converted.length) {
     html += '<div class="converted-results">';
@@ -1289,6 +1316,12 @@ async function convertSingle(body) {
     ).join('')}</div>`;
   } else if (errors.length) {
     html += `<p class="err">${errors.map(escapeHtml).join('<br>')}</p>`;
+  }
+  const skippedItems = items.filter((item) => item?.status === 'skipped');
+  if (skippedItems.length) {
+    html += `<div class="failure-groups"><h3>跳过项目（不计为失败）</h3>${skippedItems.map((item) =>
+      `<div><strong>${escapeHtml(item.sourceName || `第 ${(item.index ?? 0) + 1} 项`)}</strong>：${escapeHtml(item.error || '不兼容')}</div>`
+    ).join('')}</div>`;
   }
   resultEl.innerHTML = html;
   resultEl.querySelectorAll('[data-copy-one]').forEach((btn) => {

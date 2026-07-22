@@ -28,6 +28,7 @@ import { converterTermsVersion } from './protocol.js';
 import {
   ConversionJobError,
   ConversionJobManager,
+  ConversionJobSkippedError,
   conversionJobLimits,
 } from './conversionJobs.js';
 
@@ -100,7 +101,10 @@ export function createApp(
   const runtime = new SourceRuntime(registry, publicOrigin);
   const conversionJobs = new ConversionJobManager(async (entry) => {
     const outcome = await convertLegadoSource(entry, registry, publicOrigin);
-    if (!outcome.ok) throw new Error(outcome.error);
+    if (!outcome.ok) {
+      if (outcome.status === 'skipped') throw new ConversionJobSkippedError(outcome.error);
+      throw new Error(outcome.error);
+    }
     return outcome.converted;
   });
   const cacheDirectory = coverProxyOptions.cacheDirectory === undefined
@@ -199,10 +203,11 @@ export function createApp(
       const list = Array.isArray(legado) ? legado : [legado];
       const results: Array<ReturnType<typeof publicSourceDetail> & { alreadyExisted: boolean }> = [];
       const errors: string[] = [];
+      const skipped: string[] = [];
       const items: Array<{
         index: number;
         sourceName: string;
-        status: 'succeeded' | 'failed';
+        status: 'succeeded' | 'skipped' | 'failed';
         result?: ReturnType<typeof publicSourceDetail> & { alreadyExisted: boolean };
         error?: string;
       }> = [];
@@ -212,12 +217,15 @@ export function createApp(
         if (outcome.ok) {
           results.push(outcome.converted);
           items.push({ index, sourceName, status: 'succeeded', result: outcome.converted });
+        } else if (outcome.status === 'skipped') {
+          skipped.push(outcome.error);
+          items.push({ index, sourceName, status: 'skipped', error: outcome.error });
         } else {
           errors.push(outcome.error);
           items.push({ index, sourceName, status: 'failed', error: outcome.error });
         }
       }
-      res.json({ converted: results, errors, items });
+      res.json({ converted: results, skipped, errors, items });
     } catch (err) {
       if (err instanceof UnsafeTargetError) {
         invalidParameter(res, err.message);
@@ -620,16 +628,31 @@ async function convertLegadoSource(
   entry: unknown,
   registry: SourceRegistry,
   publicOrigin: string,
-): Promise<{ ok: true; converted: ConvertedSource } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; converted: ConvertedSource } |
+  { ok: false; status: 'skipped' | 'failed'; error: string }
+> {
   const name = sourceDisplayName(entry);
   const validation = validateLegadoSource(entry);
-  if (!validation.ok) return { ok: false, error: `${name}: ${validation.reason}` };
+  if (!validation.ok) {
+    const status = [
+      'only text book sources (bookSourceType 0) are supported',
+      'missing searchUrl/ruleSearch.bookList',
+      'missing ruleToc.chapterList',
+      'missing ruleContent.content',
+    ].includes(validation.reason) ? 'skipped' : 'failed';
+    return { ok: false, status, error: `${name}: ${validation.reason}` };
+  }
 
   const candidate = entry as LegadoBookSource;
   const compatibility = assessSourceCompatibility(candidate);
   if (!compatibility.canAttemptConversion) {
     const issue = compatibility.issues.find((item) => item.blocking)!;
-    return { ok: false, error: `${candidate.bookSourceName}: ${issue.code}: ${issue.message}` };
+    return { ok: false, status: 'skipped', error: `${candidate.bookSourceName}: ${issue.code}: ${issue.message}` };
+  }
+  const browserIssue = compatibility.issues.find((item) => item.code === 'browser_cookie_unsupported');
+  if (browserIssue) {
+    return { ok: false, status: 'skipped', error: `${candidate.bookSourceName}: ${browserIssue.code}: ${browserIssue.message}` };
   }
 
   const audit = await auditLegadoSource(candidate);
@@ -639,6 +662,7 @@ async function convertLegadoSource(
     );
     return {
       ok: false,
+      status: 'failed',
       error: sessionIssue
         ? `${candidate.bookSourceName}: ${sessionIssue.code}: ${sessionIssue.message} Runtime validation failed at ${audit.stage}.`
         : `${candidate.bookSourceName}: conversion failed at ${audit.stage}: ${audit.reason}`,

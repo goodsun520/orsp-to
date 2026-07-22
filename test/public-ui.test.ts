@@ -50,11 +50,15 @@ describe('public ORSP converter UI', () => {
     expect(html).toContain('?summary=1`');
     expect(html).toContain('/cancel`');
     expect(html).toContain('data?.progress?.expectedTotal ?? data?.progress?.total');
+    expect(html).toContain('id="batch-skipped"');
+    expect(html).toContain('const terminalCount = succeeded + skipped + failed');
     expect(html).toContain('复制全部成功地址');
     expect(html).toContain('导出 JSON');
     expect(html).toContain('导出 CSV');
     expect(html).toContain("if (/^[\\t\\r ]*[=+\\-@]/.test(text))");
     expect(html).toContain('失败项目');
+    expect(html).toContain('跳过项目（不计为失败）');
+    expect(html).toContain('items.filter(batchItemSkipped)');
   });
 
   it('offers retry after a completed batch retains failed source items', async () => {
@@ -79,5 +83,6 @@ describe('public ORSP converter UI', () => {
     expect(html).toContain('body = { source: parsed }');
     expect(html).toContain('const items = Array.isArray(data.items) ? data.items : []');
     expect(html).toContain("items.filter((item) => item?.status === 'failed')");
+    expect(html).toContain("items.filter((item) => item?.status === 'skipped')");
   });
 });

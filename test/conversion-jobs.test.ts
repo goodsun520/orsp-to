@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   ConversionJobError,
   ConversionJobManager,
+  ConversionJobSkippedError,
   conversionJobLimits,
 } from '../src/orsp/conversionJobs.js';
 import { converterTermsVersion } from '../src/orsp/protocol.js';
@@ -94,6 +95,35 @@ describe('ConversionJobManager', () => {
     );
     expect(succeeded.items[0]).toMatchObject({ status: 'succeeded', result: 'converted' });
     expect(succeeded.items[0]).not.toHaveProperty('error');
+  });
+
+  it('counts deterministic incompatibilities as skipped and never retries them', async () => {
+    let failedAttempts = 0;
+    const manager = new ConversionJobManager(async (input) => {
+      if (input === 'skip') throw new ConversionJobSkippedError('missing required content rule');
+      failedAttempts += 1;
+      if (failedAttempts === 1) throw new Error('temporary audit failure');
+      return 'converted';
+    });
+    const created = manager.create('owner', 2);
+    manager.append(created.jobId, 'owner', ['skip', 'fail']);
+    manager.seal(created.jobId, 'owner');
+
+    const completed = await waitFor(
+      () => manager.get(created.jobId, 'owner'),
+      (job) => job.status === 'completed',
+    );
+    expect(completed.progress).toMatchObject({ skipped: 1, failed: 1, completed: 2, retainedInputBytes: 6 });
+    expect(completed.items[0]).toMatchObject({ status: 'skipped', error: 'missing required content rule' });
+
+    manager.retry(created.jobId, 'owner');
+    const retried = await waitFor(
+      () => manager.get(created.jobId, 'owner'),
+      (job) => job.status === 'completed',
+    );
+    expect(retried.progress).toMatchObject({ succeeded: 1, skipped: 1, failed: 0, completed: 2 });
+    expect(retried.items[0]).toMatchObject({ status: 'skipped' });
+    expect(failedAttempts).toBe(2);
   });
 
   it('expires completed jobs and never evicts active jobs for capacity', async () => {
@@ -233,7 +263,7 @@ describe('conversion job API', () => {
         acceptedTerms: true,
         rightsConfirmed: true,
         termsVersion: converterTermsVersion,
-        expectedTotal: 2,
+        expectedTotal: 3,
       }),
     });
     const created = await createdResponse.json();
@@ -241,7 +271,7 @@ describe('conversion job API', () => {
     expect(createdResponse.headers.get('cache-control')).toBe('no-store');
     expect(created.jobId).toMatch(/^[A-Za-z0-9_-]{32}$/);
     expect(created.limits).toEqual(conversionJobLimits);
-    expect(created.progress).toMatchObject({ expectedTotal: 2, total: 0 });
+    expect(created.progress).toMatchObject({ expectedTotal: 3, total: 0 });
 
     const hidden = await fetch(`${baseUrl}/api/conversion-jobs/${created.jobId}`, {
       headers: { 'X-Forwarded-For': '198.51.100.11' },
@@ -251,10 +281,24 @@ describe('conversion job API', () => {
     const appended = await fetch(`${baseUrl}/api/conversion-jobs/${created.jobId}/chunks`, {
       method: 'POST',
       headers: ownerHeaders,
-      body: JSON.stringify({ sources: [{ bookSourceName: 'missing fields' }, null] }),
+      body: JSON.stringify({
+        sources: [
+          { bookSourceName: 'missing fields', bookSourceUrl: 'https://example.com' },
+          {
+            bookSourceName: 'browser-only',
+            bookSourceUrl: 'https://example.com',
+            searchUrl: '/search?q={{key}}',
+            ruleSearch: { bookList: '.book' },
+            ruleToc: { chapterList: '.chapter' },
+            ruleContent: { content: '.content' },
+            startBrowserAwait: 'Cloudflare challenge',
+          },
+          null,
+        ],
+      }),
     });
     expect(appended.status).toBe(200);
-    expect((await appended.json()).progress.total).toBe(2);
+    expect((await appended.json()).progress.total).toBe(3);
 
     const sealed = await fetch(`${baseUrl}/api/conversion-jobs/${created.jobId}/seal`, {
       method: 'POST',
@@ -270,10 +314,12 @@ describe('conversion job API', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     expect(job.status).toBe('completed');
-    expect(job.progress).toMatchObject({ total: 2, failed: 2, completed: 2 });
-    expect(job.items[0]).toMatchObject({ index: 0, status: 'failed' });
+    expect(job.progress).toMatchObject({ total: 3, skipped: 2, failed: 1, completed: 3 });
+    expect(job.items[0]).toMatchObject({ index: 0, status: 'skipped' });
     expect(job.items[0].sourceName).toBe('missing fields');
-    expect(job.items[0].error).toContain('missing bookSourceUrl');
+    expect(job.items[0].error).toContain('missing searchUrl/ruleSearch.bookList');
+    expect(job.items[1]).toMatchObject({ sourceName: 'browser-only', status: 'skipped' });
+    expect(job.items[1].error).toContain('browser_cookie_unsupported');
 
     const retried = await fetch(`${baseUrl}/api/conversion-jobs/${created.jobId}/retry`, {
       method: 'POST',

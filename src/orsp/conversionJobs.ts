@@ -16,7 +16,7 @@ export const conversionJobLimits = {
 } as const;
 
 export type ConversionJobStatus = 'open' | 'running' | 'completed' | 'cancelled';
-export type ConversionJobItemStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+export type ConversionJobItemStatus = 'queued' | 'running' | 'succeeded' | 'skipped' | 'failed';
 
 interface ConversionJobItem<TResult> {
   index: number;
@@ -53,6 +53,7 @@ export interface ConversionJobSnapshot<TResult> {
     queued: number;
     running: number;
     succeeded: number;
+    skipped: number;
     failed: number;
     completed: number;
     retainedInputBytes: number;
@@ -75,6 +76,9 @@ export class ConversionJobError extends Error {
     super(message);
   }
 }
+
+/** A deterministic preflight incompatibility that should not count as a conversion failure. */
+export class ConversionJobSkippedError extends Error {}
 
 export class ConversionJobManager<TResult> {
   private readonly jobs = new Map<string, ConversionJob<TResult>>();
@@ -296,7 +300,12 @@ export class ConversionJobManager<TResult> {
         })
         .catch((error: unknown) => {
           work.item.error = error instanceof Error ? error.message : 'Conversion failed.';
-          work.item.status = 'failed';
+          work.item.status = error instanceof ConversionJobSkippedError ? 'skipped' : 'failed';
+          if (work.item.status === 'skipped') {
+            work.job.retainedInputBytes -= work.item.inputBytes;
+            work.item.input = undefined;
+            work.item.inputBytes = 0;
+          }
         })
         .finally(() => {
           this.activeWorkers -= 1;
@@ -309,7 +318,9 @@ export class ConversionJobManager<TResult> {
           work.job.updatedAt = this.nowIso();
           if (
             work.job.status !== 'cancelled' &&
-            work.job.items.every((item) => item.status === 'succeeded' || item.status === 'failed')
+            work.job.items.every((item) =>
+              item.status === 'succeeded' || item.status === 'skipped' || item.status === 'failed'
+            )
           ) {
             work.job.status = 'completed';
           }
@@ -377,6 +388,7 @@ export class ConversionJobManager<TResult> {
       queued: 0,
       running: 0,
       succeeded: 0,
+      skipped: 0,
       failed: 0,
       completed: 0,
       retainedInputBytes: job.retainedInputBytes,
@@ -391,7 +403,7 @@ export class ConversionJobManager<TResult> {
         ...(item.error === undefined ? {} : { error: item.error }),
       };
     });
-    progress.completed = progress.succeeded + progress.failed;
+    progress.completed = progress.succeeded + progress.skipped + progress.failed;
     return {
       jobId: job.id,
       status: job.status,

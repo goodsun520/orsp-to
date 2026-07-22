@@ -84,4 +84,11 @@ describe('selectNodes + extractValue', () => {
     expect(extractValue($, node, '.cat a@text')).toBe('最新章节');
     expect(selectNodes($, node, '.bookname a')).toHaveLength(1);
   });
+
+  it('treats space-separated class rules as multiple classes', () => {
+    const $ = parseHtml('<div class="book clearfix">结果</div><div class="book">忽略</div>');
+    const root = [$.root().get(0)!];
+    expect(extractValue($, root, 'class.book clearfix@text')).toBe('结果');
+    expect(selectNodes($, root, 'class.book clearfix')).toHaveLength(1);
+  });
 });

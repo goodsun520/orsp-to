@@ -125,7 +125,14 @@ function findByStepUnsafe($: CheerioAPI, scope: Node[], step: ParsedStep): Node[
       matches = scope.flatMap((el) => $(el).find(`#${cssEscape(step.name!)}`).toArray());
       break;
     case 'class':
-      matches = scope.flatMap((el) => $(el).find(`.${cssEscape(step.name!)}`).toArray());
+      matches = scope.flatMap((el) => {
+        const selector = step.name!
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((name) => `.${cssEscape(name)}`)
+          .join('');
+        return selector ? $(el).find(selector).toArray() : [];
+      });
       break;
     case 'children':
       matches = scope.flatMap((el) => $(el).children().toArray());
