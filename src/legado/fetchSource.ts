@@ -1,7 +1,12 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import iconv from 'iconv-lite';
-import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici';
+import {
+  Agent,
+  fetch as undiciFetch,
+  type Dispatcher,
+  type RequestInit as UndiciRequestInit,
+} from 'undici';
 import type { CookieJar } from './cookieJar.js';
 
 // Novel sites often ship incomplete cert chains; this adapter is intentionally a
@@ -11,6 +16,8 @@ const SCRAPE_TLS = { rejectUnauthorized: false } as const;
 // Production fetches are deliberately direct. The former Hong Kong relay was
 // removed after direct end-to-end audits showed no parsing benefit.
 const scrapeDispatcher = new Agent({ connect: SCRAPE_TLS });
+const coverDispatchers = new Map<string, Agent>();
+const DEFAULT_COVER_CONNECTIONS_PER_ORIGIN = 6;
 
 export class UnsafeTargetError extends Error {}
 
@@ -142,19 +149,23 @@ async function resolvePublicTarget(url: URL): Promise<ResolvedAddress[]> {
     return [{ address: host, family: directFamily }];
   }
   if (directFamily === 0) {
-    const records = await dns.lookup(host, { all: true }).catch(() => []);
-    if (records.length === 0) throw new UnsafeTargetError('Cover target could not be resolved');
-    for (const record of records) {
-      if (
-        (record.family === 4 && isPrivateIpv4(record.address)) ||
-        (record.family === 6 && isPrivateIpv6(record.address))
-      ) {
-        throw new UnsafeTargetError('Cover target is not publicly routable');
-      }
-    }
-    return records.map((record) => ({ address: record.address, family: record.family as 4 | 6 }));
+    return resolvePublicHost(host);
   }
   throw new UnsafeTargetError('Cover target is not publicly routable');
+}
+
+async function resolvePublicHost(host: string, family: 0 | 4 | 6 = 0): Promise<ResolvedAddress[]> {
+  const records = await dns.lookup(host, { all: true, family }).catch(() => []);
+  if (records.length === 0) throw new UnsafeTargetError('Cover target could not be resolved');
+  for (const record of records) {
+    if (
+      (record.family === 4 && isPrivateIpv4(record.address)) ||
+      (record.family === 6 && isPrivateIpv6(record.address))
+    ) {
+      throw new UnsafeTargetError('Cover target is not publicly routable');
+    }
+  }
+  return records.map((record) => ({ address: record.address, family: record.family as 4 | 6 }));
 }
 
 /** Parses Legado's loose `{'Key':'Value'}` header string into a plain object. */
@@ -201,6 +212,8 @@ export interface FetchImageOptions {
   timeoutMs?: number;
   maxBytes?: number;
   cookieJar?: CookieJar;
+  signal?: AbortSignal;
+  maxConnectionsPerOrigin?: number;
   /** Test-only escape hatch for a hand-authored loopback fixture server. */
   allowPrivateAddressesForTesting?: boolean;
 }
@@ -220,6 +233,9 @@ const DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export async function fetchImage(url: URL, options: FetchImageOptions): Promise<FetchedImage> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+  const abortFromCaller = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) abortFromCaller();
+  else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
   const allowedOrigin = new URL(options.allowedOrigin).origin;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   let current = url;
@@ -229,68 +245,67 @@ export async function fetchImage(url: URL, options: FetchImageOptions): Promise<
       if (current.origin !== allowedOrigin) {
         throw new UnsafeTargetError('Cover redirect left the source origin');
       }
-      const addresses = options.allowPrivateAddressesForTesting ? null : await resolvePublicTarget(current);
-      const requestDispatcher = addresses ? createPinnedDispatcher(addresses) : scrapeDispatcher;
+      if (!options.allowPrivateAddressesForTesting) await ensurePublicTarget(current);
+      const requestDispatcher = coverDispatcher(
+        options.allowPrivateAddressesForTesting === true,
+        options.maxConnectionsPerOrigin,
+      );
 
-      try {
-        const headers = safeProxyRequestHeaders(options.headers);
-        if (options.cookieJar) {
-          const cookie = options.cookieJar.cookieHeader(current);
-          if (cookie) headers.Cookie = cookie;
-        }
-
-        let response: Response;
-        try {
-          response = (await undiciFetch(current, {
-            method: 'GET',
-            headers,
-            signal: controller.signal,
-            redirect: 'manual',
-            dispatcher: requestDispatcher,
-          })) as unknown as Response;
-        } catch (error) {
-          throw new UpstreamFetchError('Cover upstream request failed', { cause: error });
-        }
-
-        absorbResponseCookies(response, current, options.cookieJar);
-        if (REDIRECT_STATUSES.has(response.status)) {
-          const location = response.headers.get('location');
-          await response.body?.cancel();
-          if (!location || redirectCount === MAX_IMAGE_REDIRECTS) {
-            throw new UpstreamFetchError('Cover upstream redirect failed');
-          }
-          current = new URL(location, current);
-          continue;
-        }
-        if (!response.ok) {
-          await response.body?.cancel();
-          throw new UpstreamFetchError('Cover upstream returned an error');
-        }
-
-        const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? '';
-        if (!contentType.startsWith('image/')) {
-          await response.body?.cancel();
-          throw new UpstreamInvalidContentError('Cover upstream did not return an image');
-        }
-        const contentLength = Number(response.headers.get('content-length'));
-        if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-          await response.body?.cancel();
-          throw new UpstreamPayloadTooLargeError('Cover image exceeds the response limit');
-        }
-
-        const body = await readLimitedBody(response, maxBytes);
-        if (!looksLikeRasterImage(body)) {
-          throw new UpstreamInvalidContentError('Cover upstream returned invalid image bytes');
-        }
-        return {
-          body,
-          contentType,
-          etag: response.headers.get('etag') ?? undefined,
-          lastModified: response.headers.get('last-modified') ?? undefined,
-        };
-      } finally {
-        if (requestDispatcher !== scrapeDispatcher) await requestDispatcher.close();
+      const headers = safeProxyRequestHeaders(options.headers);
+      if (options.cookieJar) {
+        const cookie = options.cookieJar.cookieHeader(current);
+        if (cookie) headers.Cookie = cookie;
       }
+
+      let response: Response;
+      try {
+        response = (await undiciFetch(current, {
+          method: 'GET',
+          headers,
+          signal: controller.signal,
+          redirect: 'manual',
+          dispatcher: requestDispatcher,
+        })) as unknown as Response;
+      } catch (error) {
+        throw new UpstreamFetchError('Cover upstream request failed', { cause: error });
+      }
+
+      absorbResponseCookies(response, current, options.cookieJar);
+      if (REDIRECT_STATUSES.has(response.status)) {
+        const location = response.headers.get('location');
+        await response.body?.cancel();
+        if (!location || redirectCount === MAX_IMAGE_REDIRECTS) {
+          throw new UpstreamFetchError('Cover upstream redirect failed');
+        }
+        current = new URL(location, current);
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new UpstreamFetchError('Cover upstream returned an error');
+      }
+
+      const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? '';
+      if (!contentType.startsWith('image/')) {
+        await response.body?.cancel();
+        throw new UpstreamInvalidContentError('Cover upstream did not return an image');
+      }
+      const contentLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        await response.body?.cancel();
+        throw new UpstreamPayloadTooLargeError('Cover image exceeds the response limit');
+      }
+
+      const body = await readLimitedBody(response, maxBytes);
+      if (!looksLikeRasterImage(body)) {
+        throw new UpstreamInvalidContentError('Cover upstream returned invalid image bytes');
+      }
+      return {
+        body,
+        contentType,
+        etag: response.headers.get('etag') ?? undefined,
+        lastModified: response.headers.get('last-modified') ?? undefined,
+      };
     }
     throw new UpstreamFetchError('Cover upstream redirect failed');
   } catch (error) {
@@ -305,31 +320,45 @@ export async function fetchImage(url: URL, options: FetchImageOptions): Promise<
     throw new UpstreamFetchError('Cover upstream request failed', { cause: error });
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', abortFromCaller);
   }
 }
 
-function createPinnedDispatcher(addresses: ResolvedAddress[]): Agent {
-  let cursor = 0;
-  const lookup: net.LookupFunction = (_hostname, options, callback) => {
-    const requestedFamily = typeof options.family === 'number' ? options.family : 0;
-    const eligible = requestedFamily === 4 || requestedFamily === 6
-      ? addresses.filter((entry) => entry.family === requestedFamily)
-      : addresses;
-    if (eligible.length === 0) {
-      const error = new Error('No validated address for requested family') as NodeJS.ErrnoException;
-      error.code = 'ENOTFOUND';
-      callback(error, '', 0);
-      return;
-    }
-    if (options.all) {
-      callback(null, eligible);
-      return;
-    }
-    const selected = eligible[cursor++ % eligible.length];
-    callback(null, selected.address, selected.family);
-  };
-  return new Agent({ connect: { ...SCRAPE_TLS, lookup } });
+function coverDispatcher(allowPrivateAddressesForTesting: boolean, requestedConnections?: number): Dispatcher {
+  const connections = requestedConnections !== undefined && Number.isInteger(requestedConnections) && requestedConnections > 0
+    ? Math.min(requestedConnections, 32)
+    : DEFAULT_COVER_CONNECTIONS_PER_ORIGIN;
+  const key = `${allowPrivateAddressesForTesting ? 'test' : 'public'}:${connections}`;
+  const existing = coverDispatchers.get(key);
+  if (existing) return existing;
+
+  const lookup = allowPrivateAddressesForTesting ? undefined : publicLookup;
+  const dispatcher = new Agent({
+    connections,
+    pipelining: 1,
+    keepAliveTimeout: 15_000,
+    keepAliveMaxTimeout: 60_000,
+    connect: { ...SCRAPE_TLS, ...(lookup ? { lookup } : {}) },
+  });
+  coverDispatchers.set(key, dispatcher);
+  return dispatcher;
 }
+
+const publicLookup: net.LookupFunction = (hostname, rawOptions, callback) => {
+  const options = typeof rawOptions === 'number' ? { family: rawOptions } : rawOptions;
+  const requestedFamily = options.family === 4 || options.family === 6 ? options.family : 0;
+  void resolvePublicHost(hostname, requestedFamily).then(
+    (addresses) => {
+      if (options.all) {
+        callback(null, addresses);
+        return;
+      }
+      const selected = addresses[0];
+      callback(null, selected.address, selected.family);
+    },
+    (error: unknown) => callback(error as NodeJS.ErrnoException, '', 0),
+  );
+};
 
 function looksLikeRasterImage(body: Buffer): boolean {
   if (body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) return true;

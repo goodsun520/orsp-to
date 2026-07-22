@@ -11,6 +11,7 @@ function cleanUrlKey(url: string): string {
 
 const MAX_TRACKED_IDENTIFIERS = 1_000;
 const MAX_COVER_ASSETS = 2_000;
+export const MAX_COVER_URL_LENGTH = 8_192;
 
 export interface SourceStats {
   /** Times someone submitted this bookSourceUrl for conversion (incl. dedup hits). */
@@ -112,7 +113,12 @@ export class SourceRegistry {
         record.unsupported = detectUnsupportedFeatures(record.legado);
         if (record.coverAssets && typeof record.coverAssets === 'object') {
           const entries = Object.entries(record.coverAssets)
-            .filter(([id, url]) => isValidOpaqueId(id) && typeof url === 'string')
+            .filter(
+              ([id, url]) =>
+                isValidOpaqueId(id) &&
+                typeof url === 'string' &&
+                url.length <= MAX_COVER_URL_LENGTH,
+            )
             .slice(-MAX_COVER_ASSETS);
           record.coverAssets = Object.fromEntries(entries);
         }
@@ -164,6 +170,11 @@ export class SourceRegistry {
     return this.sources.get(id);
   }
 
+  /** Resolves a runtime-owned path beside the persisted source records. */
+  runtimePath(name: string): string | null {
+    return this.dataDir === null ? null : path.join(this.dataDir, name);
+  }
+
   /**
    * Converts an upstream URL into a valid ORSP opaque ID. Base64url remains
    * backwards-compatible for URLs that fit the 200-character wire limit;
@@ -197,7 +208,7 @@ export class SourceRegistry {
   /** Registers a source-owned cover and returns a non-reversible asset key. */
   registerCoverUrl(sourceId: string, url: string): string | null {
     const record = this.sources.get(sourceId);
-    if (!record) return null;
+    if (!record || url.length > MAX_COVER_URL_LENGTH) return null;
     let cover: URL;
     let source: URL;
     try {
@@ -224,7 +235,8 @@ export class SourceRegistry {
 
   resolveCoverUrl(sourceId: string, assetId: string): string | null {
     if (!isValidOpaqueId(assetId) || !assetId.startsWith('c-')) return null;
-    return this.sources.get(sourceId)?.coverAssets?.[assetId] ?? null;
+    const url = this.sources.get(sourceId)?.coverAssets?.[assetId];
+    return url && url.length <= MAX_COVER_URL_LENGTH ? url : null;
   }
 
   /**

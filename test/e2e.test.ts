@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/orsp/server.js';
 import { SourceRegistry } from '../src/orsp/registry.js';
 import type { LegadoBookSource } from '../src/legado/types.js';
-import { startFixtureServer } from './fixtures/server.js';
+import { startFixtureServer, type FixtureStats } from './fixtures/server.js';
 import { ensurePublicTarget, UnsafeTargetError } from '../src/legado/fetchSource.js';
 import { converterTermsVersion } from '../src/orsp/protocol.js';
 
@@ -16,10 +16,19 @@ const conversionConsent = {
   termsVersion: converterTermsVersion,
 };
 
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for fixture state');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 let fixtureServer: Server;
 let appServer: Server;
 let strictServer: Server;
 let fixtureBaseUrl: string;
+let fixtureStats: FixtureStats;
 let appBaseUrl: string;
 let strictAppBaseUrl: string;
 let dataDir: string;
@@ -163,6 +172,7 @@ beforeAll(async () => {
   const fixture = await startFixtureServer();
   fixtureServer = fixture.server;
   fixtureBaseUrl = fixture.baseUrl;
+  fixtureStats = fixture.stats;
 
   dataDir = await mkdtemp(path.join(os.tmpdir(), 'orsp-legado-test-'));
   registry = new SourceRegistry(dataDir);
@@ -184,7 +194,11 @@ beforeAll(async () => {
   const app = createApp(registry, 'http://app.local', '', {
     allowPrivateAddressesForTesting: true,
     maxBytes: 256,
-    timeoutMs: 75,
+    timeoutMs: 150,
+    maxConnectionsPerOrigin: 3,
+    cacheFreshMs: 100,
+    cacheStaleMs: 5_000,
+    cacheMaxBytes: 1024 * 1024,
   });
   await new Promise<void>((resolve) => {
     appServer = app.listen(0, '127.0.0.1', () => {
@@ -496,6 +510,85 @@ describe('ORSP adapter against a self-authored fixture site', () => {
     expect(body.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   });
 
+  it('bounds and reuses upstream connections for concurrent distinct covers', async () => {
+    fixtureStats.maxActiveCoverRequests = 0;
+    const connectionsBefore = fixtureStats.connectionCount;
+    const assetIds = Array.from({ length: 9 }, (_, index) =>
+      registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}/covers/pool-${index}.jpg`),
+    );
+
+    const responses = await Promise.all(
+      assetIds.map((assetId) => fetch(`${appBaseUrl}/s/${sourceId}/api/v1/assets/covers/${assetId}`)),
+    );
+    expect(responses.map((response) => response.status)).toEqual(Array(9).fill(200));
+    await Promise.all(responses.map((response) => response.arrayBuffer()));
+    expect(fixtureStats.maxActiveCoverRequests).toBeLessThanOrEqual(3);
+    expect(fixtureStats.connectionCount - connectionsBefore).toBeLessThanOrEqual(3);
+
+    const connectionsAfterFirstWave = fixtureStats.connectionCount;
+    const reusedIds = Array.from({ length: 3 }, (_, index) =>
+      registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}/covers/pool-${index + 9}.jpg`),
+    );
+    const reused = await Promise.all(
+      reusedIds.map((assetId) => fetch(`${appBaseUrl}/s/${sourceId}/api/v1/assets/covers/${assetId}`)),
+    );
+    expect(reused.map((response) => response.status)).toEqual(Array(3).fill(200));
+    await Promise.all(reused.map((response) => response.arrayBuffer()));
+    expect(fixtureStats.connectionCount).toBe(connectionsAfterFirstWave);
+  });
+
+  it('coalesces concurrent cover misses and persists successful cache hits', async () => {
+    const pathName = '/covers/cache.jpg';
+    const before = fixtureStats.coverRequests[pathName] ?? 0;
+    const assetId = registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}${pathName}`)!;
+    const proxyUrl = `${appBaseUrl}/s/${sourceId}/api/v1/assets/covers/${assetId}`;
+
+    const firstWave = await Promise.all(Array.from({ length: 6 }, () => fetch(proxyUrl)));
+    expect(firstWave.map((response) => response.status)).toEqual(Array(6).fill(200));
+    await Promise.all(firstWave.map((response) => response.arrayBuffer()));
+    expect(fixtureStats.coverRequests[pathName] - before).toBe(1);
+
+    const cached = await fetch(proxyUrl);
+    expect(cached.status).toBe(200);
+    await cached.arrayBuffer();
+    expect(fixtureStats.coverRequests[pathName] - before).toBe(1);
+    const cacheFiles = await readdir(path.join(dataDir, '.cover-cache'));
+    expect(cacheFiles.some((file) => file.endsWith('.bin'))).toBe(true);
+    expect(cacheFiles.some((file) => file.endsWith('.json'))).toBe(true);
+  });
+
+  it('serves a validated stale cover when refresh has a transient upstream failure', async () => {
+    const pathName = '/covers/stale.jpg';
+    const assetId = registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}${pathName}`)!;
+    const proxyUrl = `${appBaseUrl}/s/${sourceId}/api/v1/assets/covers/${assetId}`;
+
+    const initial = await fetch(proxyUrl);
+    expect(initial.status).toBe(200);
+    const initialBody = Buffer.from(await initial.arrayBuffer());
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const stale = await fetch(proxyUrl);
+    expect(stale.status).toBe(200);
+    expect(Buffer.from(await stale.arrayBuffer())).toEqual(initialBody);
+    expect(fixtureStats.coverRequests[pathName]).toBe(2);
+  });
+
+  it('cancels the upstream cover request when the downstream client disconnects', async () => {
+    const pathName = '/covers/abort.jpg';
+    const assetId = registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}${pathName}`)!;
+    const controller = new AbortController();
+    const request = fetch(`${appBaseUrl}/s/${sourceId}/api/v1/assets/covers/${assetId}`, {
+      signal: controller.signal,
+    });
+    await waitFor(() => (fixtureStats.coverRequests[pathName] ?? 0) > 0);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    await waitFor(() => fixtureStats.abortedCoverRequests > 0);
+
+    const health = await fetch(`${appBaseUrl}/api/sources`);
+    expect(health.status).toBe(200);
+  });
+
   it('returns 404 for unknown source and cover asset IDs', async () => {
     const missingSource = await fetch(`${appBaseUrl}/s/missing/api/v1/assets/covers/c-missing`);
     const missingAsset = await fetch(`${appBaseUrl}/s/${sourceId}/api/v1/assets/covers/c-missing`);
@@ -540,6 +633,7 @@ describe('ORSP adapter against a self-authored fixture site', () => {
 
   it('does not register cross-origin assets or permit private proxy targets', async () => {
     expect(registry.registerCoverUrl(sourceId, 'https://evil.example/cover.jpg')).toBeNull();
+    expect(registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}/${'x'.repeat(9_000)}`)).toBeNull();
     const localAsset = registry.registerCoverUrl(sourceId, `${fixtureBaseUrl}/covers/1001.jpg`)!;
     const strictResponse = await fetch(`${strictAppBaseUrl}/s/${sourceId}/api/v1/assets/covers/${localAsset}`);
     expect(strictResponse.status).toBe(502);

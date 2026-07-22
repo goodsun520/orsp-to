@@ -17,6 +17,7 @@ import {
   UpstreamInvalidContentError,
   UpstreamPayloadTooLargeError,
 } from '../legado/fetchSource.js';
+import { CoverResponseCache } from './coverCache.js';
 import { cookieScopeKey, jarForSource } from '../legado/cookieJar.js';
 import { AdminAuth, ADMIN_SESSION_COOKIE, readSessionCookie } from './adminAuth.js';
 import { RateLimiter, clientIp } from './rateLimit.js';
@@ -64,6 +65,12 @@ function sendJson(req: Request, res: Response, body: unknown): void {
 export interface CoverProxyOptions {
   timeoutMs?: number;
   maxBytes?: number;
+  maxConnectionsPerOrigin?: number;
+  cacheDirectory?: string | null;
+  cacheFreshMs?: number;
+  cacheStaleMs?: number;
+  cacheMaxBytes?: number;
+  cacheMaxEntries?: number;
   /** Only test fixtures may set this; production leaves it false. */
   allowPrivateAddressesForTesting?: boolean;
 }
@@ -85,6 +92,15 @@ export function createApp(
   const voteLimiter = new RateLimiter(60_000, 30);
   const loginLimiter = new RateLimiter(60_000, 5);
   const runtime = new SourceRuntime(registry, publicOrigin);
+  const cacheDirectory = coverProxyOptions.cacheDirectory === undefined
+    ? registry.runtimePath('.cover-cache')
+    : coverProxyOptions.cacheDirectory;
+  const coverCache = new CoverResponseCache(cacheDirectory, {
+    freshMs: coverProxyOptions.cacheFreshMs,
+    staleMs: coverProxyOptions.cacheStaleMs,
+    maxBytes: coverProxyOptions.cacheMaxBytes,
+    maxEntries: coverProxyOptions.cacheMaxEntries,
+  });
 
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // behind our own nginx reverse proxy: trust X-Forwarded-* for IP + req.secure
@@ -334,20 +350,38 @@ export function createApp(
     if (!record) return notFound(res, 'Unknown source id');
     const upstreamUrl = registry.resolveCoverUrl(record.id, req.params.assetId);
     if (!upstreamUrl) return notFound(res, 'Unknown cover asset');
+    const clientAbort = new AbortController();
+    const abortForClosedClient = () => {
+      if (!res.writableEnded) clientAbort.abort();
+    };
+    res.once('close', abortForClosedClient);
     try {
       const sourceOrigin = new URL(cleanSourceBaseUrl(record.legado.bookSourceUrl)).origin;
+      const coverUrl = new URL(upstreamUrl);
       const headers = parseLegadoHeaders(record.legado.header);
       const cookie = headers.Cookie || headers.cookie;
       const jar = jarForSource(cookieScopeKey(record.legado));
       if (cookie) jar.seedFromHeader(new URL(sourceOrigin), cookie);
-      const image = await fetchImage(new URL(upstreamUrl), {
-        allowedOrigin: sourceOrigin,
-        headers,
-        cookieJar: jar,
-        timeoutMs: coverProxyOptions.timeoutMs,
-        maxBytes: coverProxyOptions.maxBytes,
-        allowPrivateAddressesForTesting: coverProxyOptions.allowPrivateAddressesForTesting,
-      });
+      const image = await coverCache.getOrFetch(
+        [
+          coverProxyOptions.allowPrivateAddressesForTesting ? 'private-test' : 'public',
+          record.id,
+          req.params.assetId,
+          upstreamUrl,
+        ].join('\0'),
+        clientAbort.signal,
+        (signal) => fetchImage(coverUrl, {
+          allowedOrigin: sourceOrigin,
+          headers,
+          cookieJar: jar,
+          signal,
+          timeoutMs: coverProxyOptions.timeoutMs,
+          maxBytes: coverProxyOptions.maxBytes,
+          maxConnectionsPerOrigin: coverProxyOptions.maxConnectionsPerOrigin,
+          allowPrivateAddressesForTesting: coverProxyOptions.allowPrivateAddressesForTesting,
+        }),
+      );
+      if (clientAbort.signal.aborted || res.destroyed) return;
       res.set({
         'Cache-Control': 'public, max-age=86400',
         'Content-Type': image.contentType,
@@ -358,6 +392,7 @@ export function createApp(
       });
       res.status(200).send(image.body);
     } catch (err) {
+      if (clientAbort.signal.aborted || res.destroyed) return;
       if (err instanceof UpstreamPayloadTooLargeError) {
         sendError(res, 413, 'PAYLOAD_TOO_LARGE', 'Cover image exceeds the response limit');
         return;
@@ -367,6 +402,8 @@ export function createApp(
         return;
       }
       sendError(res, 502, 'UPSTREAM_ERROR', 'Cover image is temporarily unavailable', true);
+    } finally {
+      res.off('close', abortForClosedClient);
     }
   });
 

@@ -52,8 +52,23 @@ const JSON_ROUTES: Record<string, unknown> = {
   '/api/books/1001/chapters/c-2': { data: { content: 'JSON 正文第二章。' } },
 };
 
-export async function startFixtureServer(): Promise<{ server: Server; baseUrl: string }> {
+export interface FixtureStats {
+  coverRequests: Record<string, number>;
+  activeCoverRequests: number;
+  maxActiveCoverRequests: number;
+  connectionCount: number;
+  abortedCoverRequests: number;
+}
+
+export async function startFixtureServer(): Promise<{ server: Server; baseUrl: string; stats: FixtureStats }> {
   let oneShotExploreRequests = 0;
+  const stats: FixtureStats = {
+    coverRequests: {},
+    activeCoverRequests: 0,
+    maxActiveCoverRequests: 0,
+    connectionCount: 0,
+    abortedCoverRequests: 0,
+  };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://fixture.local');
     if (url.pathname === '/cross-origin-search') {
@@ -96,6 +111,42 @@ export async function startFixtureServer(): Promise<{ server: Server; baseUrl: s
       return;
     }
     if (url.pathname === '/covers/1001.jpg' || url.pathname === '/covers/1002.jpg') {
+      stats.coverRequests[url.pathname] = (stats.coverRequests[url.pathname] ?? 0) + 1;
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': ONE_PIXEL_PNG.length }).end(ONE_PIXEL_PNG);
+      return;
+    }
+    if (/^\/covers\/pool-\d+\.jpg$/.test(url.pathname)) {
+      stats.coverRequests[url.pathname] = (stats.coverRequests[url.pathname] ?? 0) + 1;
+      stats.activeCoverRequests += 1;
+      stats.maxActiveCoverRequests = Math.max(stats.maxActiveCoverRequests, stats.activeCoverRequests);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      stats.activeCoverRequests -= 1;
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': ONE_PIXEL_PNG.length }).end(ONE_PIXEL_PNG);
+      return;
+    }
+    if (url.pathname === '/covers/cache.jpg') {
+      stats.coverRequests[url.pathname] = (stats.coverRequests[url.pathname] ?? 0) + 1;
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': ONE_PIXEL_PNG.length }).end(ONE_PIXEL_PNG);
+      return;
+    }
+    if (url.pathname === '/covers/stale.jpg') {
+      stats.coverRequests[url.pathname] = (stats.coverRequests[url.pathname] ?? 0) + 1;
+      if (stats.coverRequests[url.pathname] > 1) {
+        req.socket.destroy();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': ONE_PIXEL_PNG.length }).end(ONE_PIXEL_PNG);
+      return;
+    }
+    if (url.pathname === '/covers/abort.jpg') {
+      stats.coverRequests[url.pathname] = (stats.coverRequests[url.pathname] ?? 0) + 1;
+      let completed = false;
+      res.once('close', () => {
+        if (!completed) stats.abortedCoverRequests += 1;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      if (res.destroyed) return;
+      completed = true;
       res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': ONE_PIXEL_PNG.length }).end(ONE_PIXEL_PNG);
       return;
     }
@@ -139,8 +190,11 @@ export async function startFixtureServer(): Promise<{ server: Server; baseUrl: s
     const html = await readFile(path.join(pagesDir, file), 'utf8');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
   });
+  server.on('connection', () => {
+    stats.connectionCount += 1;
+  });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
-  return { server, baseUrl: `http://127.0.0.1:${port}` };
+  return { server, baseUrl: `http://127.0.0.1:${port}`, stats };
 }

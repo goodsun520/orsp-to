@@ -21,7 +21,7 @@
 - 相同 `bookSourceUrl` 自动去重并复用已有地址
 - 只有完整通过 `search → detail → catalog → content` 验证的源才公开
 - 统计成功正文读取、近期匿名读者、转换次数和点赞
-- 将同源封面代理为当前 ORSP 服务地址，并限制响应类型、大小和跳转目标
+- 将同源封面代理为当前 ORSP 服务地址，限制响应类型、大小和跳转目标，并使用有界连接池及持久缓存削峰
 - 定时重新审计已挂载书源，健康检查不计入真实阅读量
 
 ## 支持范围
@@ -69,6 +69,12 @@ npm run check
 | `DATA_DIR` | `./data/sources` | 已转换书源的持久化目录 |
 | `ADMIN_PASSWORD` | 空 | 管理页密码；为空时管理登录禁用 |
 | `STATS_HASH_KEY` | 开发默认值 | 生产环境必须设置，用于匿名指标 HMAC |
+| `COVER_FETCH_TIMEOUT_MS` | `10000` | 单次封面上游请求（含排队）的超时毫秒数 |
+| `COVER_UPSTREAM_CONNECTIONS` | `6` | 每个上游来源允许的最大并发连接数，最高限制为 32 |
+| `COVER_CACHE_DIR` | `$DATA_DIR/.cover-cache` | 持久封面缓存目录；部署时应与 `DATA_DIR` 一起保留 |
+| `COVER_CACHE_FRESH_HOURS` | `24` | 缓存无需刷新即可直接返回的小时数 |
+| `COVER_CACHE_STALE_HOURS` | `168` | 上游暂时失败时可返回已验证旧缓存的最长小时数 |
+| `COVER_CACHE_MAX_MB` | `256` | 封面缓存总大小上限；清理时优先删除最早写入的条目 |
 
 `.env.example` 仅作为变量清单。项目不会自动加载 `.env`；请通过运行环境、
 systemd 或 Node.js `--env-file` 传入配置。
@@ -105,6 +111,7 @@ systemd 或 Node.js `--env-file` 传入配置。
 - 原始 IP、城市和地理位置不会持久化或公开。
 - 点赞去重和近期读者统计只保存由 `STATS_HASH_KEY` 生成的 HMAC 标识，并限制数量。
 - 运行时获得的 Cookie 只存在于进程内存，不写入公开 API、日志、审计报告或 Git。
+- 已验证的封面响应临时保存在 `COVER_CACHE_DIR`，受大小和最长保留时间限制；只在同一已登记封面 URL 上游暂时失败时返回旧缓存。
 - 排行榜只公开聚合计数。
 
 ## 部署
