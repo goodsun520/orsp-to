@@ -439,6 +439,21 @@
   .converted-results { margin-top: 0.7rem; }
   .converted-item { margin: 0.45rem 0; padding: 0.65rem 0; border-top: 1px solid var(--border); }
   .converted-item button { margin-top: 0.35rem; }
+  .batch-panel { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .batch-panel[hidden] { display: none; }
+  .batch-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+  .batch-id { color: var(--muted); font: 0.75rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .progress-track { height: 0.55rem; margin: 0.8rem 0; overflow: hidden; border-radius: 999px; background: var(--surface-soft); }
+  .progress-bar { width: 0; height: 100%; border-radius: inherit; background: var(--accent-strong); transition: width 240ms ease; }
+  .batch-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem; }
+  .batch-count { padding: 0.55rem; border-left: 2px solid var(--border-strong); background: rgba(255, 255, 255, 0.018); }
+  .batch-count strong { display: block; font: 800 1.15rem/1.2 "DIN Alternate", sans-serif; font-variant-numeric: tabular-nums; }
+  .batch-count span { color: var(--muted); font-size: 0.72rem; }
+  .batch-actions { margin-top: 0.7rem; }
+  .failure-groups { margin-top: 1rem; }
+  .failure-group { padding: 0.65rem 0; border-top: 1px solid var(--border); }
+  .failure-group summary { cursor: pointer; color: var(--err); font-size: 0.88rem; }
+  .failure-group ul { margin: 0.5rem 0 0; padding-left: 1.25rem; color: var(--muted); font-size: 0.82rem; }
   footer { display: flex; justify-content: space-between; gap: 1rem; margin-top: 1.5rem; padding: 0.75rem 0; font-size: 0.8rem; color: var(--muted); }
   footer a { color: var(--accent); }
   @media (max-width: 820px) {
@@ -460,6 +475,7 @@
     .toolbar { align-items: stretch; }
     .toolbar .row { width: 100%; }
     .search-box { max-width: none; }
+    .batch-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     footer { display: block; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -546,6 +562,24 @@
             <span id="consent-state" class="muted consent-state">同意免责声明与使用条款后可使用转换功能。</span>
           </div>
           <div id="convert-result" aria-live="polite"></div>
+          <section id="batch-panel" class="batch-panel" aria-labelledby="batch-title" hidden>
+            <div class="batch-heading">
+              <h2 id="batch-title">合集转换进度</h2>
+              <span id="batch-job-id" class="batch-id"></span>
+            </div>
+            <div class="progress-track" role="progressbar" aria-label="合集转换进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="batch-progress-bar" class="progress-bar"></div>
+            </div>
+            <div id="batch-status" class="muted" aria-live="polite"></div>
+            <div class="batch-counts" aria-label="合集转换计数">
+              <div class="batch-count"><strong id="batch-total">0</strong><span>总数</span></div>
+              <div class="batch-count"><strong id="batch-pending">0</strong><span>待处理 / 处理中</span></div>
+              <div class="batch-count"><strong id="batch-succeeded">0</strong><span>成功</span></div>
+              <div class="batch-count"><strong id="batch-failed">0</strong><span>失败</span></div>
+            </div>
+            <div id="batch-actions" class="row batch-actions"></div>
+            <div id="batch-results"></div>
+          </section>
         </article>
 
         <aside class="card notice-card" aria-labelledby="notice-title">
@@ -627,12 +661,21 @@
 <script>
 const VOTED_KEY = 'orsp_voted_ids';
 const TERMS_KEY = 'orsp_terms_acceptance';
+const ACTIVE_JOB_KEY = 'orsp_active_conversion_job';
 const TERMS_VERSION = '2026-07-22';
+const BATCH_CHUNK_SIZE = 25;
+const BATCH_CHUNK_MAX_BYTES = 900 * 1024;
+const BATCH_ITEM_MAX_BYTES = 512 * 1024;
+const BATCH_JOB_MAX_BYTES = 32 * 1024 * 1024;
+const MAX_BATCH_ITEMS = 5000;
+const BATCH_POLL_INTERVAL_MS = 1200;
 let currentSort = 'usage';
 let cachedItems = [];
 let cachedSummary = null;
 let termsAccepted = false;
 let appStarted = false;
+let activeJobId = null;
+let batchPollToken = 0;
 
 function votedIds() {
   try { return new Set(JSON.parse(localStorage.getItem(VOTED_KEY) || '[]')); } catch { return new Set(); }
@@ -671,6 +714,7 @@ function startApp() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') fetchGithubStars();
   });
+  resumeSavedBatchJob();
 }
 
 function openTerms() {
@@ -907,6 +951,352 @@ async function readFileAsJson(file) {
   return JSON.parse(text);
 }
 
+function consentPayload() {
+  return {
+    acceptedTerms: true,
+    rightsConfirmed: true,
+    termsVersion: TERMS_VERSION,
+  };
+}
+
+async function requestJson(url, options = {}) {
+  const res = await fetch(url, options);
+  let data = null;
+  try { data = await res.json(); } catch { /* A useful HTTP status is still available below. */ }
+  if (!res.ok) {
+    const error = new Error(data?.error?.message || `请求失败（HTTP ${res.status}）`);
+    error.status = res.status;
+    throw error;
+  }
+  return data;
+}
+
+function setConversionBusy(busy) {
+  document.getElementById('convert-btn').disabled = busy || !termsAccepted;
+}
+
+function batchItemSucceeded(item) {
+  return ['succeeded', 'success', 'completed'].includes(item?.status);
+}
+
+function batchItemFailed(item) {
+  return ['failed', 'error'].includes(item?.status);
+}
+
+function batchResult(item) {
+  return item?.result || item?.converted || (item?.discoveryUrl ? item : null);
+}
+
+function batchErrorText(item) {
+  const error = item?.error;
+  if (typeof error === 'string') return error;
+  return error?.message || error?.code || '未知错误';
+}
+
+function batchSourceName(item) {
+  const result = batchResult(item);
+  return result?.name || item?.name || item?.sourceName || `第 ${(item?.index ?? 0) + 1} 项`;
+}
+
+function normalizeBatchSnapshot(data) {
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const expectedTotal = Number(data?.expectedTotal ?? data?.progress?.expectedTotal ?? data?.progress?.total ?? items.length) || 0;
+  const succeeded = Number(data?.progress?.succeeded ?? items.filter(batchItemSucceeded).length) || 0;
+  const failed = Number(data?.progress?.failed ?? items.filter(batchItemFailed).length) || 0;
+  const terminalCount = succeeded + failed;
+  return {
+    ...data,
+    items,
+    expectedTotal,
+    succeeded,
+    failed,
+    pending: Math.max(0, expectedTotal - terminalCount),
+    terminalCount,
+  };
+}
+
+function isTerminalJob(status) {
+  return ['completed', 'complete', 'failed', 'cancelled', 'canceled'].includes(status);
+}
+
+function groupBatchFailures(items) {
+  const groups = new Map();
+  for (const item of items.filter(batchItemFailed)) {
+    const message = batchErrorText(item);
+    if (!groups.has(message)) groups.set(message, []);
+    groups.get(message).push(batchSourceName(item));
+  }
+  return groups;
+}
+
+function csvCell(value) {
+  let text = String(value ?? '');
+  if (/^[\t\r ]*[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function batchExportRows(snapshot) {
+  return snapshot.items.map((item) => {
+    const result = batchResult(item);
+    return {
+      index: item.index,
+      status: item.status,
+      name: batchSourceName(item),
+      discoveryUrl: result?.discoveryUrl || '',
+      alreadyExisted: result?.alreadyExisted ?? '',
+      error: batchItemFailed(item) ? batchErrorText(item) : '',
+    };
+  });
+}
+
+function downloadText(filename, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function renderBatchSnapshot(raw) {
+  const snapshot = normalizeBatchSnapshot(raw);
+  const panel = document.getElementById('batch-panel');
+  panel.hidden = false;
+  document.getElementById('batch-job-id').textContent = `任务 ${snapshot.jobId || activeJobId || ''}`;
+  document.getElementById('batch-total').textContent = snapshot.expectedTotal;
+  document.getElementById('batch-pending').textContent = snapshot.pending;
+  document.getElementById('batch-succeeded').textContent = snapshot.succeeded;
+  document.getElementById('batch-failed').textContent = snapshot.failed;
+  const percent = snapshot.expectedTotal ? Math.round((snapshot.terminalCount / snapshot.expectedTotal) * 100) : 0;
+  const progressTrack = panel.querySelector('[role="progressbar"]');
+  progressTrack.setAttribute('aria-valuenow', String(percent));
+  document.getElementById('batch-progress-bar').style.width = `${percent}%`;
+  const statusLabels = {
+    open: '正在上传合集', sealed: '已提交，等待处理', queued: '等待处理', running: '正在转换',
+    completed: '转换完成', complete: '转换完成', failed: '任务失败', cancelled: '任务已取消',
+  };
+  document.getElementById('batch-status').textContent = `${statusLabels[snapshot.status] || snapshot.status || '处理中'} · ${percent}%`;
+
+  const successes = snapshot.items.filter(batchItemSucceeded).map((item) => ({ item, result: batchResult(item) })).filter(({ result }) => result?.discoveryUrl);
+  const actions = document.getElementById('batch-actions');
+  const canRetryFailures = snapshot.status === 'completed' && snapshot.failed > 0;
+  actions.innerHTML = `
+    ${successes.length ? '<button type="button" class="secondary" data-batch-copy>复制全部成功地址</button>' : ''}
+    ${snapshot.items.length ? '<button type="button" class="ghost" data-batch-json>导出 JSON</button><button type="button" class="ghost" data-batch-csv>导出 CSV</button>' : ''}
+    ${canRetryFailures ? '<button type="button" data-batch-retry>仅重试失败项</button>' : ''}
+  `;
+  const resultEl = document.getElementById('batch-results');
+  let html = '';
+  if (successes.length) {
+    html += '<div class="converted-results"><h3>成功地址</h3>';
+    for (const { item, result } of successes) {
+      html += `<div class="converted-item">
+        <div><strong>${escapeHtml(batchSourceName(item))}</strong>${result.alreadyExisted ? '<span class="ok">（已存在复用）</span>' : ''}</div>
+        <div class="discovery-url">${escapeHtml(result.discoveryUrl)}</div>
+        <button class="secondary" data-copy-one="${escapeHtml(result.discoveryUrl)}">复制地址</button>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  const failureGroups = groupBatchFailures(snapshot.items);
+  if (failureGroups.size) {
+    html += '<div class="failure-groups"><h3>失败项目</h3>';
+    for (const [message, names] of failureGroups) {
+      html += `<details class="failure-group"><summary>${escapeHtml(message)}（${names.length}）</summary><ul>${names.map((name) => `<li>${escapeHtml(name)}</li>`).join('')}</ul></details>`;
+    }
+    html += '</div>';
+  }
+  resultEl.innerHTML = html;
+  resultEl.querySelectorAll('[data-copy-one]').forEach((btn) => {
+    btn.addEventListener('click', () => navigator.clipboard.writeText(btn.dataset.copyOne));
+  });
+  actions.querySelector('[data-batch-copy]')?.addEventListener('click', () => {
+    navigator.clipboard.writeText(successes.map(({ result }) => result.discoveryUrl).join('\n'));
+  });
+  actions.querySelector('[data-batch-json]')?.addEventListener('click', () => {
+    downloadText(`orsp-results-${activeJobId}.json`, JSON.stringify(batchExportRows(snapshot), null, 2), 'application/json;charset=utf-8');
+  });
+  actions.querySelector('[data-batch-csv]')?.addEventListener('click', () => {
+    const rows = batchExportRows(snapshot);
+    const header = ['index', 'status', 'name', 'discoveryUrl', 'alreadyExisted', 'error'];
+    const csv = [header.join(','), ...rows.map((row) => header.map((key) => csvCell(row[key])).join(','))].join('\r\n');
+    downloadText(`orsp-results-${activeJobId}.csv`, `\ufeff${csv}`, 'text/csv;charset=utf-8');
+  });
+  actions.querySelector('[data-batch-retry]')?.addEventListener('click', retryFailedBatch);
+  return snapshot;
+}
+
+async function retryFailedBatch(event) {
+  const button = event.currentTarget;
+  const jobId = activeJobId;
+  button.disabled = true;
+  document.getElementById('batch-status').textContent = '正在重新提交失败项目…';
+  try {
+    const snapshot = await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
+    try { localStorage.setItem(ACTIVE_JOB_KEY, jobId); } catch { /* Polling still works in this page session. */ }
+    renderBatchSnapshot(snapshot);
+    pollBatchJob(jobId);
+  } catch (err) {
+    button.disabled = false;
+    document.getElementById('batch-status').textContent = `重试失败：${err.message}`;
+  }
+}
+
+async function pollBatchJob(jobId) {
+  activeJobId = jobId;
+  const token = ++batchPollToken;
+  setConversionBusy(true);
+  while (token === batchPollToken) {
+    try {
+      const data = await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}?summary=1`);
+      let snapshot = normalizeBatchSnapshot(data);
+      if (snapshot.status === 'open') {
+        const cancelled = await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+        try { localStorage.removeItem(ACTIVE_JOB_KEY); } catch { /* Ignore unavailable storage. */ }
+        renderBatchSnapshot(cancelled);
+        document.getElementById('batch-status').textContent = '上次合集上传未完成，遗留任务已取消；请重新选择文件。';
+        setConversionBusy(false);
+        return;
+      }
+      if (isTerminalJob(snapshot.status) || snapshot.terminalCount >= snapshot.expectedTotal) {
+        snapshot = renderBatchSnapshot(await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}`));
+        setConversionBusy(false);
+        fetchSources();
+        return;
+      }
+      renderBatchSnapshot(data);
+    } catch (err) {
+      if (err.status === 404) {
+        try { localStorage.removeItem(ACTIVE_JOB_KEY); } catch { /* Ignore unavailable storage. */ }
+        document.getElementById('batch-status').textContent = '保存的合集任务已过期或不属于当前网络地址。';
+        setConversionBusy(false);
+        return;
+      }
+      document.getElementById('batch-panel').hidden = false;
+      document.getElementById('batch-status').textContent = `读取任务进度失败，正在重试：${err.message}`;
+    }
+    await new Promise((resolve) => setTimeout(resolve, BATCH_POLL_INTERVAL_MS));
+  }
+}
+
+function resumeSavedBatchJob() {
+  let jobId = null;
+  try { jobId = localStorage.getItem(ACTIVE_JOB_KEY); } catch { /* Storage can be unavailable. */ }
+  if (jobId) pollBatchJob(jobId);
+}
+
+async function startBatchConversion(sources) {
+  if (!sources.length) throw new Error('合集内没有书源。');
+  if (sources.length > MAX_BATCH_ITEMS) throw new Error(`单次合集最多支持 ${MAX_BATCH_ITEMS} 个书源。`);
+  const { chunks } = buildBatchChunks(sources);
+  setConversionBusy(true);
+  document.getElementById('batch-panel').hidden = false;
+  document.getElementById('batch-status').textContent = `正在创建 ${sources.length} 项的转换任务…`;
+  const created = await requestJson('/api/conversion-jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expectedTotal: sources.length, ...consentPayload() }),
+  });
+  const jobId = created.jobId;
+  if (!jobId) throw new Error('服务器未返回合集任务 ID。');
+  activeJobId = jobId;
+  try { localStorage.setItem(ACTIVE_JOB_KEY, jobId); } catch { /* Upload can still continue in this page session. */ }
+  document.getElementById('batch-job-id').textContent = `任务 ${jobId}`;
+  try {
+    let uploaded = 0;
+    for (const chunk of chunks) {
+      document.getElementById('batch-status').textContent = `正在上传 ${uploaded + chunk.length} / ${sources.length}…`;
+      await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}/chunks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: chunk }),
+      });
+      uploaded += chunk.length;
+    }
+    document.getElementById('batch-status').textContent = '上传完成，正在启动转换…';
+    await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}/seal`, { method: 'POST' });
+  } catch (error) {
+    let cancelled = false;
+    try {
+      await requestJson(`/api/conversion-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+      cancelled = true;
+    } catch { /* Keep the saved ID so a later page load can retry cancellation. */ }
+    if (cancelled) {
+      try { localStorage.removeItem(ACTIVE_JOB_KEY); } catch { /* Ignore unavailable storage. */ }
+    }
+    throw error;
+  }
+  pollBatchJob(jobId);
+}
+
+function buildBatchChunks(sources) {
+  const encoder = new TextEncoder();
+  const chunks = [];
+  let chunk = [];
+  let chunkBytes = 2;
+  let totalBytes = 0;
+  for (const source of sources) {
+    const sourceBytes = encoder.encode(JSON.stringify(source)).byteLength;
+    if (sourceBytes > BATCH_ITEM_MAX_BYTES) {
+      throw new Error(`存在超过 ${Math.floor(BATCH_ITEM_MAX_BYTES / 1024)}KB 的单条书源，无法安全上传。`);
+    }
+    totalBytes += sourceBytes;
+    if (totalBytes > BATCH_JOB_MAX_BYTES) {
+      throw new Error(`合集规则数据超过 ${Math.floor(BATCH_JOB_MAX_BYTES / 1024 / 1024)}MB，无法在单个任务中安全处理。`);
+    }
+    if (chunk.length && (chunk.length >= BATCH_CHUNK_SIZE || chunkBytes + sourceBytes + 1 > BATCH_CHUNK_MAX_BYTES)) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 2;
+    }
+    chunk.push(source);
+    chunkBytes += sourceBytes + 1;
+  }
+  if (chunk.length) chunks.push(chunk);
+  return { chunks, totalBytes };
+}
+
+async function convertSingle(body) {
+  const status = document.getElementById('convert-status');
+  const resultEl = document.getElementById('convert-result');
+  const data = await requestJson('/api/convert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, ...consentPayload() }),
+  });
+  const converted = data.converted || [];
+  const errors = data.errors || [];
+  const items = Array.isArray(data.items) ? data.items : [];
+  const reused = converted.filter((c) => c.alreadyExisted).length;
+  status.textContent = `完成：新转换 ${converted.length - reused} 个，已存在复用 ${reused} 个，失败 ${errors.length} 个。`;
+  let html = '';
+  if (converted.length) {
+    html += '<div class="converted-results">';
+    for (const c of converted) {
+      html += `<div class="converted-item"><div><strong>${escapeHtml(c.name)}</strong>
+        ${c.alreadyExisted ? '<span class="ok">（已有人转换过，直接复用）</span>' : '<span class="ok">（新转换）</span>'}</div>
+        <div class="discovery-url">${escapeHtml(c.discoveryUrl)}</div>
+        <button class="secondary" data-copy-one="${escapeHtml(c.discoveryUrl)}">复制地址</button></div>`;
+    }
+    html += '</div>';
+  }
+  const failedItems = items.filter((item) => item?.status === 'failed');
+  if (failedItems.length) {
+    html += `<div class="failure-groups"><h3>失败项目</h3>${failedItems.map((item) =>
+      `<div class="err"><strong>${escapeHtml(item.sourceName || `第 ${(item.index ?? 0) + 1} 项`)}</strong>：${escapeHtml(item.error || '未知错误')}</div>`
+    ).join('')}</div>`;
+  } else if (errors.length) {
+    html += `<p class="err">${errors.map(escapeHtml).join('<br>')}</p>`;
+  }
+  resultEl.innerHTML = html;
+  resultEl.querySelectorAll('[data-copy-one]').forEach((btn) => {
+    btn.addEventListener('click', () => navigator.clipboard.writeText(btn.dataset.copyOne));
+  });
+  fetchSources();
+}
+
 document.getElementById('convert-btn').addEventListener('click', async () => {
   const status = document.getElementById('convert-status');
   const resultEl = document.getElementById('convert-result');
@@ -925,65 +1315,36 @@ document.getElementById('convert-btn').addEventListener('click', async () => {
   try {
     let body;
     if (fileInput.files.length > 0) {
-      body = { source: await readFileAsJson(fileInput.files[0]) };
+      const parsed = await readFileAsJson(fileInput.files[0]);
+      if (Array.isArray(parsed)) {
+        status.textContent = '';
+        resultEl.innerHTML = '';
+        await startBatchConversion(parsed);
+        return;
+      }
+      body = { source: parsed };
     } else if (urlInput.value.trim()) {
       body = { url: urlInput.value.trim() };
     } else if (pasteInput.value.trim()) {
-      body = { source: JSON.parse(pasteInput.value) };
+      const parsed = JSON.parse(pasteInput.value);
+      if (Array.isArray(parsed)) {
+        status.textContent = '';
+        resultEl.innerHTML = '';
+        await startBatchConversion(parsed);
+        return;
+      }
+      body = { source: parsed };
     } else {
       status.textContent = '';
       resultEl.innerHTML = '<p class="err">请上传文件、填写 URL 或粘贴 JSON。</p>';
       return;
     }
 
-    body = {
-      ...body,
-      acceptedTerms: true,
-      rightsConfirmed: true,
-      termsVersion: TERMS_VERSION,
-    };
-
-    const res = await fetch('/api/convert', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      status.textContent = '';
-      resultEl.innerHTML = `<p class="err">${escapeHtml(data.error?.message || '转换失败')}</p>`;
-      return;
-    }
-    const reused = data.converted.filter((c) => c.alreadyExisted).length;
-    const fresh = data.converted.length - reused;
-    status.textContent = `完成：新转换 ${fresh} 个，已存在复用 ${reused} 个，失败 ${data.errors.length} 个。`;
-
-    let html = '';
-    if (data.converted.length) {
-      html += '<div class="converted-results">';
-      for (const c of data.converted) {
-        html += `
-          <div class="converted-item">
-            <div><strong>${escapeHtml(c.name)}</strong>
-              ${c.alreadyExisted ? '<span class="ok">（已有人转换过，直接复用）</span>' : '<span class="ok">（新转换）</span>'}
-            </div>
-            <div class="discovery-url">${escapeHtml(c.discoveryUrl)}</div>
-            <button class="secondary" data-copy-one="${escapeHtml(c.discoveryUrl)}">复制地址</button>
-          </div>`;
-      }
-      html += '</div>';
-    }
-    if (data.errors.length) {
-      html += `<p class="err">${data.errors.map(escapeHtml).join('<br>')}</p>`;
-    }
-    resultEl.innerHTML = html;
-    resultEl.querySelectorAll('[data-copy-one]').forEach((btn) => {
-      btn.addEventListener('click', () => navigator.clipboard.writeText(btn.dataset.copyOne));
-    });
-    fetchSources();
+    await convertSingle(body);
   } catch (err) {
     status.textContent = '';
     resultEl.innerHTML = `<p class="err">${escapeHtml(err.message)}</p>`;
+    setConversionBusy(false);
   }
 });
 

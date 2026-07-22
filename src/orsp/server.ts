@@ -25,6 +25,11 @@ import { auditLegadoSource } from './sourceAudit.js';
 import { SourceRuntime, SourceRuntimeError } from './sourceRuntime.js';
 import { assessSourceCompatibility } from './sourceCompatibility.js';
 import { converterTermsVersion } from './protocol.js';
+import {
+  ConversionJobError,
+  ConversionJobManager,
+  conversionJobLimits,
+} from './conversionJobs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -89,9 +94,15 @@ export function createApp(
   const app = express();
   const adminAuth = new AdminAuth(adminPassword);
   const convertLimiter = new RateLimiter(60_000, 10);
+  const conversionChunkLimiter = new RateLimiter(60_000, 120);
   const voteLimiter = new RateLimiter(60_000, 30);
   const loginLimiter = new RateLimiter(60_000, 5);
   const runtime = new SourceRuntime(registry, publicOrigin);
+  const conversionJobs = new ConversionJobManager(async (entry) => {
+    const outcome = await convertLegadoSource(entry, registry, publicOrigin);
+    if (!outcome.ok) throw new Error(outcome.error);
+    return outcome.converted;
+  });
   const cacheDirectory = coverProxyOptions.cacheDirectory === undefined
     ? registry.runtimePath('.cover-cache')
     : coverProxyOptions.cacheDirectory;
@@ -161,19 +172,7 @@ export function createApp(
   });
 
   app.post('/api/convert', async (req: Request, res: Response) => {
-    if (
-      req.body?.acceptedTerms !== true ||
-      req.body?.rightsConfirmed !== true ||
-      req.body?.termsVersion !== converterTermsVersion
-    ) {
-      sendError(
-        res,
-        403,
-        'TERMS_NOT_ACCEPTED',
-        `Accept terms version ${converterTermsVersion} and confirm lawful access rights before converting.`,
-      );
-      return;
-    }
+    if (!requireConversionConsent(req, res)) return;
     const ip = clientIp(req);
     if (!convertLimiter.check(ip)) {
       sendError(res, 429, 'RATE_LIMITED', 'Too many conversion requests, try again in a minute.', true);
@@ -200,48 +199,116 @@ export function createApp(
       const list = Array.isArray(legado) ? legado : [legado];
       const results: Array<ReturnType<typeof publicSourceDetail> & { alreadyExisted: boolean }> = [];
       const errors: string[] = [];
-      for (const entry of list) {
-        const validation = validateLegadoSource(entry);
-        if (!validation.ok) {
-          errors.push(`${(entry as { bookSourceName?: string })?.bookSourceName ?? '(unnamed)'}: ${validation.reason}`);
-          continue;
+      const items: Array<{
+        index: number;
+        sourceName: string;
+        status: 'succeeded' | 'failed';
+        result?: ReturnType<typeof publicSourceDetail> & { alreadyExisted: boolean };
+        error?: string;
+      }> = [];
+      for (const [index, entry] of list.entries()) {
+        const sourceName = sourceDisplayName(entry, index);
+        const outcome = await convertLegadoSource(entry, registry, publicOrigin);
+        if (outcome.ok) {
+          results.push(outcome.converted);
+          items.push({ index, sourceName, status: 'succeeded', result: outcome.converted });
+        } else {
+          errors.push(outcome.error);
+          items.push({ index, sourceName, status: 'failed', error: outcome.error });
         }
-        const candidate = entry as LegadoBookSource;
-        const compatibility = assessSourceCompatibility(candidate);
-        if (!compatibility.canAttemptConversion) {
-          const issue = compatibility.issues.find((item) => item.blocking)!;
-          errors.push(`${candidate.bookSourceName}: ${issue.code}: ${issue.message}`);
-          continue;
-        }
-        const audit = await auditLegadoSource(candidate);
-        if (audit.status === 'parse_failed') {
-          const sessionIssue = compatibility.issues.find((item) =>
-            ['browser_cookie_unsupported', 'interactive_login_unsupported'].includes(item.code),
-          );
-          errors.push(
-            sessionIssue
-              ? `${candidate.bookSourceName}: ${sessionIssue.code}: ${sessionIssue.message} Runtime validation failed at ${audit.stage}.`
-              : `${candidate.bookSourceName}: conversion failed at ${audit.stage}: ${audit.reason}`,
-          );
-          continue;
-        }
-        const { record, isNew } = await registry.add(candidate);
-        await registry.setHealth(record.id, {
-          checkedAt: new Date().toISOString(),
-          status: 'parse_passed',
-          query: audit.query,
-          discoveryChecked: audit.discoveryChecked,
-          stages: audit.stages,
-        });
-        results.push({ ...publicSourceDetail(record, publicOrigin), alreadyExisted: !isNew });
       }
-      res.json({ converted: results, errors });
+      res.json({ converted: results, errors, items });
     } catch (err) {
       if (err instanceof UnsafeTargetError) {
         invalidParameter(res, err.message);
         return;
       }
       invalidParameter(res, err instanceof Error ? err.message : 'Failed to parse source JSON.');
+    }
+  });
+
+  app.use('/api/conversion-jobs', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+
+  app.post('/api/conversion-jobs', (req: Request, res: Response) => {
+    if (!requireConversionConsent(req, res)) return;
+    const expectedTotal = req.body?.expectedTotal;
+    if (!Number.isInteger(expectedTotal) || expectedTotal < 1 || expectedTotal > conversionJobLimits.maxItems) {
+      sendError(
+        res,
+        400,
+        'INVALID_EXPECTED_TOTAL',
+        `expectedTotal must be an integer between 1 and ${conversionJobLimits.maxItems}.`,
+      );
+      return;
+    }
+    const ip = clientIp(req);
+    if (!convertLimiter.check(ip)) {
+      sendError(res, 429, 'RATE_LIMITED', 'Too many conversion requests, try again in a minute.', true);
+      return;
+    }
+    try {
+      res.status(201).json({
+        ...conversionJobs.create(ip, expectedTotal),
+        limits: conversionJobLimits,
+      });
+    } catch (error) {
+      handleConversionJobError(res, error);
+    }
+  });
+
+  app.post('/api/conversion-jobs/:id/chunks', (req: Request, res: Response) => {
+    try {
+      if (!conversionChunkLimiter.check(clientIp(req))) {
+        sendError(res, 429, 'RATE_LIMITED', 'Too many chunk uploads, try again in a minute.', true);
+        return;
+      }
+      if (!Array.isArray(req.body?.sources)) {
+        sendError(res, 400, 'INVALID_CHUNK', 'Provide a sources array.');
+        return;
+      }
+      res.json(conversionJobs.append(req.params.id, clientIp(req), req.body.sources));
+    } catch (error) {
+      handleConversionJobError(res, error);
+    }
+  });
+
+  app.post('/api/conversion-jobs/:id/seal', (req: Request, res: Response) => {
+    try {
+      res.status(202).json(conversionJobs.seal(req.params.id, clientIp(req)));
+    } catch (error) {
+      handleConversionJobError(res, error);
+    }
+  });
+
+  app.post('/api/conversion-jobs/:id/retry', (req: Request, res: Response) => {
+    if (!convertLimiter.check(clientIp(req))) {
+      sendError(res, 429, 'RATE_LIMITED', 'Too many conversion requests, try again in a minute.', true);
+      return;
+    }
+    try {
+      res.status(202).json(conversionJobs.retry(req.params.id, clientIp(req)));
+    } catch (error) {
+      handleConversionJobError(res, error);
+    }
+  });
+
+  app.post('/api/conversion-jobs/:id/cancel', (req: Request, res: Response) => {
+    try {
+      res.json(conversionJobs.cancel(req.params.id, clientIp(req)));
+    } catch (error) {
+      handleConversionJobError(res, error);
+    }
+  });
+
+  app.get('/api/conversion-jobs/:id', (req: Request, res: Response) => {
+    try {
+      const snapshot = conversionJobs.get(req.params.id, clientIp(req));
+      res.json(req.query.summary === '1' ? { ...snapshot, items: [] } : snapshot);
+    } catch (error) {
+      handleConversionJobError(res, error);
     }
   });
 
@@ -537,6 +604,84 @@ function validateLegadoSource(value: unknown): { ok: true } | { ok: false; reaso
     return { ok: false, reason: 'missing ruleContent.content' };
   }
   return { ok: true };
+}
+
+type ConvertedSource = ReturnType<typeof publicSourceDetail> & { alreadyExisted: boolean };
+
+function sourceDisplayName(entry: unknown, index = 0): string {
+  if (entry && typeof entry === 'object') {
+    const name = (entry as { bookSourceName?: unknown }).bookSourceName;
+    if (typeof name === 'string' && name.trim()) return name.trim().slice(0, 200);
+  }
+  return `第 ${index + 1} 项`;
+}
+
+async function convertLegadoSource(
+  entry: unknown,
+  registry: SourceRegistry,
+  publicOrigin: string,
+): Promise<{ ok: true; converted: ConvertedSource } | { ok: false; error: string }> {
+  const name = sourceDisplayName(entry);
+  const validation = validateLegadoSource(entry);
+  if (!validation.ok) return { ok: false, error: `${name}: ${validation.reason}` };
+
+  const candidate = entry as LegadoBookSource;
+  const compatibility = assessSourceCompatibility(candidate);
+  if (!compatibility.canAttemptConversion) {
+    const issue = compatibility.issues.find((item) => item.blocking)!;
+    return { ok: false, error: `${candidate.bookSourceName}: ${issue.code}: ${issue.message}` };
+  }
+
+  const audit = await auditLegadoSource(candidate);
+  if (audit.status === 'parse_failed') {
+    const sessionIssue = compatibility.issues.find((item) =>
+      ['browser_cookie_unsupported', 'interactive_login_unsupported'].includes(item.code),
+    );
+    return {
+      ok: false,
+      error: sessionIssue
+        ? `${candidate.bookSourceName}: ${sessionIssue.code}: ${sessionIssue.message} Runtime validation failed at ${audit.stage}.`
+        : `${candidate.bookSourceName}: conversion failed at ${audit.stage}: ${audit.reason}`,
+    };
+  }
+
+  const { record, isNew } = await registry.add(candidate);
+  await registry.setHealth(record.id, {
+    checkedAt: new Date().toISOString(),
+    status: 'parse_passed',
+    query: audit.query,
+    discoveryChecked: audit.discoveryChecked,
+    stages: audit.stages,
+  });
+  return {
+    ok: true,
+    converted: { ...publicSourceDetail(record, publicOrigin), alreadyExisted: !isNew },
+  };
+}
+
+function requireConversionConsent(req: Request, res: Response): boolean {
+  if (
+    req.body?.acceptedTerms === true &&
+    req.body?.rightsConfirmed === true &&
+    req.body?.termsVersion === converterTermsVersion
+  ) {
+    return true;
+  }
+  sendError(
+    res,
+    403,
+    'TERMS_NOT_ACCEPTED',
+    `Accept terms version ${converterTermsVersion} and confirm lawful access rights before converting.`,
+  );
+  return false;
+}
+
+function handleConversionJobError(res: Response, error: unknown): void {
+  if (error instanceof ConversionJobError) {
+    sendError(res, error.status, error.code, error.message);
+    return;
+  }
+  handleRouteError(res, error);
 }
 
 function sendError(res: Response, status: number, code: string, message: string, retryable = false): void {

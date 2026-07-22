@@ -227,6 +227,7 @@ export interface FetchedImage {
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_IMAGE_REDIRECTS = 5;
+const MAX_PAGE_REDIRECTS = 5;
 const DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /** Fetches a same-origin image with bounded streaming and per-hop SSRF checks. */
@@ -462,27 +463,59 @@ export async function fetchPage(path: string, options: FetchOptions): Promise<{ 
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 15000);
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const requestHeaders = { ...headers };
-      const requestCookie = options.cookieJar?.cookieHeader(url);
-      if (requestCookie) requestHeaders.Cookie = requestCookie;
+      let currentUrl = url;
+      let currentMethod = method;
+      let currentBody = body;
+      let cookieChanged = false;
+      let response: Response | undefined;
 
-      let response: Response;
-      try {
-        const init: UndiciRequestInit = {
-          method,
-          headers: requestHeaders,
-          body: body instanceof Buffer ? new Uint8Array(body) : body,
-          signal: controller.signal,
-          redirect: 'follow',
-          dispatcher: scrapeDispatcher,
-        };
-        response = (await undiciFetch(url, init)) as unknown as Response;
-      } catch (err) {
-        throw new UpstreamFetchError(`Failed to reach ${url.origin}`, { cause: err });
+      for (let redirectCount = 0; redirectCount <= MAX_PAGE_REDIRECTS; redirectCount++) {
+        await ensureSafeTarget(currentUrl);
+        const requestHeaders = { ...headers };
+        if (currentUrl.origin !== url.origin) {
+          delete requestHeaders.Authorization;
+          delete requestHeaders.authorization;
+          delete requestHeaders['Proxy-Authorization'];
+          delete requestHeaders['proxy-authorization'];
+        }
+        if (currentMethod === 'GET' && currentBody === undefined) {
+          delete requestHeaders['Content-Type'];
+          delete requestHeaders['content-type'];
+        }
+        const requestCookie = options.cookieJar?.cookieHeader(currentUrl);
+        if (requestCookie) requestHeaders.Cookie = requestCookie;
+
+        try {
+          const init: UndiciRequestInit = {
+            method: currentMethod,
+            headers: requestHeaders,
+            body: currentBody instanceof Buffer ? new Uint8Array(currentBody) : currentBody,
+            signal: controller.signal,
+            redirect: 'manual',
+            dispatcher: scrapeDispatcher,
+          };
+          response = (await undiciFetch(currentUrl, init)) as unknown as Response;
+        } catch (err) {
+          throw new UpstreamFetchError(`Failed to reach ${currentUrl.origin}`, { cause: err });
+        }
+
+        cookieChanged = absorbResponseCookies(response, currentUrl, options.cookieJar) || cookieChanged;
+        if (!REDIRECT_STATUSES.has(response.status)) break;
+        const location = response.headers.get('location');
+        if (!location) break;
+        await response.body?.cancel();
+        if (redirectCount === MAX_PAGE_REDIRECTS) {
+          throw new UpstreamFetchError(`Upstream ${url} exceeded the redirect limit`);
+        }
+        currentUrl = new URL(location, currentUrl);
+        if (response.status === 303 || ((response.status === 301 || response.status === 302) && currentMethod === 'POST')) {
+          currentMethod = 'GET';
+          currentBody = undefined;
+        }
+        response = undefined;
       }
 
-      const finalUrl = new URL(response.url || url.toString());
-      const cookieChanged = absorbResponseCookies(response, finalUrl, options.cookieJar);
+      if (!response) throw new UpstreamFetchError(`Upstream ${url} redirect failed`);
       const buf = Buffer.from(await response.arrayBuffer());
       const html = decodeBody(buf, response.headers.get('content-type'), options.charset);
 
@@ -499,7 +532,7 @@ export async function fetchPage(path: string, options: FetchOptions): Promise<{ 
         throw new UpstreamFetchError(`Upstream ${url} responded ${response.status}`);
       }
 
-      return { url: response.url || url.toString(), html };
+      return { url: currentUrl.toString(), html };
     }
     throw new UpstreamFetchError(`Failed to establish upstream session for ${url.origin}`);
   } finally {

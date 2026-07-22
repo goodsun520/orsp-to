@@ -48,6 +48,7 @@ export interface LegadoBookSource {
   enabled?: boolean;
   enabledCookieJar?: boolean;
   header?: string;
+  jsLib?: string;
   searchUrl?: string;
   exploreUrl?: string;
   ruleSearch?: LegadoRuleSearch;

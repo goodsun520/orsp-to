@@ -30,6 +30,7 @@ const JSON_ROUTES: Record<string, unknown> = {
         title: '接口之书',
         author_name: 'API 作者',
         category_name: '科幻',
+        status: '完结',
         cover_url: '/covers/1001.jpg',
       },
     ],
@@ -40,6 +41,7 @@ const JSON_ROUTES: Record<string, unknown> = {
     author_name: 'API 作者',
     intro: '来自 JSON API 的详情。',
     category_name: '科幻',
+    status: '完结',
     cover_url: '/covers/1001.jpg',
   },
   '/api/books/1001/chapters': {
@@ -88,6 +90,22 @@ export async function startFixtureServer(): Promise<{ server: Server; baseUrl: s
           'Content-Type': 'text/html; charset=utf-8',
           'Set-Cookie': `${expected}; Path=/; HttpOnly`,
         }).end('session required');
+        return;
+      }
+      const html = await readFile(path.join(pagesDir, 'search.html'), 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
+      return;
+    }
+    if (url.pathname === '/redirect-cookie-search') {
+      res.writeHead(302, {
+        Location: `/redirect-cookie-result?key=${encodeURIComponent(url.searchParams.get('key') ?? '')}`,
+        'Set-Cookie': 'redirectSession=ready; Path=/; HttpOnly',
+      }).end();
+      return;
+    }
+    if (url.pathname === '/redirect-cookie-result') {
+      if (!req.headers.cookie?.includes('redirectSession=ready')) {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end('redirect cookie required');
         return;
       }
       const html = await readFile(path.join(pagesDir, 'search.html'), 'utf8');

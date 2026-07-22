@@ -69,4 +69,19 @@ describe('selectNodes + extractValue', () => {
     const node = [$('a').get(0)!];
     expect(extractValue($, node, 'href@js:java.ajax(result)')).toBe('/book/1');
   });
+
+  it('supports descendant CSS selectors used by shorthand Legado rules', () => {
+    const $ = parseHtml(`
+      <div class="bookbox">
+        <h4 class="bookname"><a href="/47/">我真没想重生啊</a></h4>
+        <div class="cat"><a href="/47/38307.html">最新章节</a></div>
+      </div>
+    `);
+    const node = [$('.bookbox').get(0)!];
+
+    expect(extractValue($, node, '.bookname a@text')).toBe('我真没想重生啊');
+    expect(extractValue($, node, '.bookname a@href')).toBe('/47/');
+    expect(extractValue($, node, '.cat a@text')).toBe('最新章节');
+    expect(selectNodes($, node, '.bookname a')).toHaveLength(1);
+  });
 });

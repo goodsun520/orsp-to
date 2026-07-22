@@ -31,4 +31,53 @@ describe('public ORSP converter UI', () => {
     expect(html).toContain('acceptedTerms: true');
     expect(html).toContain('rightsConfirmed: true');
   });
+
+  it('uploads collection files through bounded asynchronous conversion jobs', async () => {
+    const html = await readFile(publicIndexPath, 'utf8');
+
+    expect(html).toContain("const ACTIVE_JOB_KEY = 'orsp_active_conversion_job'");
+    expect(html).toContain('const BATCH_CHUNK_SIZE = 25');
+    expect(html).toContain('const BATCH_CHUNK_MAX_BYTES = 900 * 1024');
+    expect(html).toContain('const BATCH_JOB_MAX_BYTES = 32 * 1024 * 1024');
+    expect(html).toContain('buildBatchChunks(sources)');
+    expect(html).toContain("requestJson('/api/conversion-jobs'");
+    expect(html).toContain('expectedTotal: sources.length');
+    expect(html).toContain('/chunks`');
+    expect(html).toContain('JSON.stringify({ sources: chunk })');
+    expect(html).toContain('/seal`');
+    expect(html).toContain('pollBatchJob(jobId)');
+    expect(html).toContain('localStorage.setItem(ACTIVE_JOB_KEY, jobId)');
+    expect(html).toContain('?summary=1`');
+    expect(html).toContain('/cancel`');
+    expect(html).toContain('data?.progress?.expectedTotal ?? data?.progress?.total');
+    expect(html).toContain('复制全部成功地址');
+    expect(html).toContain('导出 JSON');
+    expect(html).toContain('导出 CSV');
+    expect(html).toContain("if (/^[\\t\\r ]*[=+\\-@]/.test(text))");
+    expect(html).toContain('失败项目');
+  });
+
+  it('offers retry after a completed batch retains failed source items', async () => {
+    const html = await readFile(publicIndexPath, 'utf8');
+
+    expect(html).toContain("snapshot.status === 'completed' && snapshot.failed > 0");
+    expect(html).toContain('仅重试失败项');
+    expect(html).toContain('/retry`');
+    expect(html).toContain("{ method: 'POST' }");
+    expect(html).toContain('pollBatchJob(jobId)');
+  });
+
+  it('keeps single objects and URL input on the synchronous route while batching pasted arrays', async () => {
+    const html = await readFile(publicIndexPath, 'utf8');
+
+    expect(html).toContain('if (Array.isArray(parsed))');
+    expect(html.match(/if \(Array\.isArray\(parsed\)\)/g)).toHaveLength(2);
+    expect(html).toContain('await startBatchConversion(parsed)');
+    expect(html).toContain("requestJson('/api/convert'");
+    expect(html).toContain('body = { url: urlInput.value.trim() }');
+    expect(html).toContain('const parsed = JSON.parse(pasteInput.value)');
+    expect(html).toContain('body = { source: parsed }');
+    expect(html).toContain('const items = Array.isArray(data.items) ? data.items : []');
+    expect(html).toContain("items.filter((item) => item?.status === 'failed')");
+  });
 });

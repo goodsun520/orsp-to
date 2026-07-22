@@ -19,10 +19,11 @@ export class RateLimiter {
   }
 }
 
-/** Best-effort client IP: trusts nginx's X-Forwarded-For (this app only ever sits behind our own reverse proxy). */
-export function clientIp(req: { headers: Record<string, unknown>; socket: { remoteAddress?: string } }): string {
+/** Best-effort client IP. Express resolves `ip` using the configured one-hop trusted proxy. */
+export function clientIp(req: { ip?: string; headers: Record<string, unknown>; socket: { remoteAddress?: string } }): string {
+  if (typeof req.ip === 'string' && req.ip.trim()) return req.ip.trim();
   const forwarded = req.headers['x-forwarded-for'];
-  const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  if (typeof first === 'string' && first.trim()) return first.split(',')[0].trim();
+  const value = Array.isArray(forwarded) ? forwarded.at(-1) : forwarded;
+  if (typeof value === 'string' && value.trim()) return value.split(',').at(-1)!.trim();
   return req.socket.remoteAddress ?? 'unknown';
 }

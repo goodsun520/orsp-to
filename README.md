@@ -17,6 +17,7 @@
 ## 功能
 
 - 通过 JSON 文件、粘贴内容或 URL 导入书源
+- 合集数组在浏览器端分块上传，通过异步任务显示逐项进度、失败原因并支持仅重试失败项
 - 将搜索、发现、详情、目录和正文映射为 ORSP 1.4 API
 - 相同 `bookSourceUrl` 自动去重并复用已有地址
 - 只有完整通过 `search → detail → catalog → content` 验证的源才公开
@@ -26,8 +27,11 @@
 
 ## 支持范围
 
-当前覆盖常见 Default/CSS 选择器、基础 JSONPath、URL 模板、POST 表单、
-字符集转换、静态 Cookie 和普通 HTTP `Set-Cookie` 会话。
+当前覆盖常见 Default/CSS 选择器、基础及递归 JSONPath、常见 JSON 字段模板、URL 模板、POST 表单、
+字符集转换、静态 Cookie，以及包含重定向 Cookie 的普通 HTTP `Set-Cookie` 会话。
+
+对于经过代码审计、名称/域名/规则指纹完全匹配的来源，可以提供固定协议 codec；
+当前包括连尚读书的 XXTEA/RSA API。该例外不会执行导入 JSON 中的 JavaScript。
 
 以下能力不会执行：
 
@@ -86,6 +90,12 @@ systemd 或 Node.js `--env-file` 传入配置。
 | `GET` | `/api/sources?sort=usage\|votes\|converts\|newest` | 公开书源列表和聚合统计 |
 | `GET` | `/api/sources/:id` | 单个书源详情 |
 | `POST` | `/api/convert` | 转换书源；必须同时提交当前条款版本、同意声明和合法访问确认 |
+| `POST` | `/api/conversion-jobs` | 创建异步合集任务；提交预计条目数和与单条转换相同的确认字段 |
+| `POST` | `/api/conversion-jobs/:id/chunks` | 向任务追加最多 50 条书源，总计最多 5000 条 |
+| `POST` | `/api/conversion-jobs/:id/seal` | 封口并以最多 4 个并发开始审计 |
+| `GET` | `/api/conversion-jobs/:id` | 查询逐项进度和转换结果 |
+| `POST` | `/api/conversion-jobs/:id/retry` | 仅重新审计已完成任务中的失败项 |
+| `POST` | `/api/conversion-jobs/:id/cancel` | 取消未封口或仍在执行的合集任务 |
 | `POST` | `/api/sources/:id/vote` | 匿名点赞 |
 | `GET` | `/s/:id/.well-known/open-reading-source.json` | ORSP 发现文档 |
 | `GET` | `/s/:id/api/v1/...` | ORSP 读取接口 |
@@ -104,6 +114,14 @@ systemd 或 Node.js `--env-file` 传入配置。
 ```
 
 缺少任一确认或条款版本过期时，接口返回 `403 TERMS_NOT_ACCEPTED`。
+同步接口保留 `converted` 和 `errors` 字段，并额外返回逐项
+`items: [{ index, sourceName, status, result?, error? }]`，因此合集中的成功项与失败项可以明确对应。
+
+合集文件由网页先解析为数组，再以小批次提交，因此不需要提高公开 HTTP
+入口的请求体上限。任务 ID 会保存在当前浏览器，刷新页面后可继续查看；任务只允许
+创建它的客户端网络地址读取或追加，过期任务会由服务端清理。单条规则限制为
+512KB、单批限制为 1MB、单任务保留的规则数据限制为 32MB；任务保存在进程内，
+服务重启后不会恢复。
 
 ## 数据与隐私
 

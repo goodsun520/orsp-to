@@ -245,7 +245,12 @@ export function selectNodes($: CheerioAPI, scope: Node[], rule: string | undefin
     if (m) return selectCss($, scope, m[1]);
   }
 
-  const segments = stripRegexSuffix(trimmed).split('@');
+  const withoutRegex = stripRegexSuffix(trimmed);
+  if (!withoutRegex.includes('@') && looksLikeDescendantCss(withoutRegex)) {
+    return selectDescendantCss($, scope, withoutRegex);
+  }
+
+  const segments = withoutRegex.split('@');
   let current = scope;
   for (const segment of segments) {
     if (/^css:/i.test(segment)) {
@@ -272,6 +277,23 @@ function selectCss($: CheerioAPI, scope: Node[], css: string): Node[] {
   } catch {
     return [];
   }
+}
+
+function looksLikeDescendantCss(value: string): boolean {
+  return /\s|>|\+|~/.test(value);
+}
+
+function selectDescendantCss($: CheerioAPI, scope: Node[], value: string): Node[] {
+  if (!/[>+~]/.test(value)) {
+    let current = scope;
+    for (const segment of value.trim().split(/\s+/).filter(Boolean)) {
+      current = findByStep($, current, parseStep(segment));
+    }
+    return current;
+  }
+  const positioned = value.match(/^(.*(?:\s|>|\+|~)[^\s>+~]+)\.(-?\d+)$/);
+  if (!positioned) return selectCss($, scope, value);
+  return applyPosition(selectCss($, scope, positioned[1]), positioned[2]);
 }
 
 /**
@@ -352,6 +374,10 @@ function evaluateSingle($: CheerioAPI, scope: Node[], rule: string): string[] {
   for (const segment of selectorSegments) {
     if (/^css:/i.test(segment)) {
       current = selectCss($, current, segment.slice(4));
+      continue;
+    }
+    if (looksLikeDescendantCss(segment)) {
+      current = selectDescendantCss($, current, segment);
       continue;
     }
     current = findByStep($, current, parseStep(segment));

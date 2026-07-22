@@ -24,7 +24,15 @@ export class CatalogCache {
 
   async getOrLoad(key: string, loader: () => Promise<TocChapter[]>): Promise<TocChapter[]> {
     const cached = this.entries.get(key);
-    if (cached && cached.expiresAt > this.now()) return cached.chapters;
+    if (cached && cached.expiresAt > this.now()) {
+      // Whole-book downloads keep reading the same catalog for several
+      // minutes. Treat every hit as active use so a download does not cross a
+      // fixed expiry boundary and unexpectedly refetch the upstream TOC.
+      cached.expiresAt = this.now() + this.ttlMs;
+      this.entries.delete(key);
+      this.entries.set(key, cached);
+      return cached.chapters;
+    }
     if (cached) this.entries.delete(key);
 
     const existing = this.inflight.get(key);

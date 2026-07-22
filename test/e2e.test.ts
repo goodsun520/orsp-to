@@ -35,6 +35,7 @@ let dataDir: string;
 let sourceId: string;
 let apiSourceId: string;
 let staleExploreSourceId: string;
+let misassignedCoverSourceId: string;
 let registry: SourceRegistry;
 
 function fixtureSource(bookSourceUrl: string): LegadoBookSource {
@@ -88,12 +89,12 @@ function apiFixtureSource(bookSourceUrl: string): LegadoBookSource {
     bookSourceUrl,
     searchUrl: '/api/search?key={{key}}&page={{page}}',
     ruleSearch: {
-      bookList: '$.data',
+      bookList: '$..data[*]',
       name: '$.title',
       author: '$.author_name',
-      kind: '$.category_name',
+      kind: '$.category_name&&$.status',
       coverUrl: '$.cover_url',
-      bookUrl: '/api/books/{{$.book_id}}',
+      bookUrl: '/api/books/{$.book_id}',
     },
     ruleBookInfo: {
       name: '$.title',
@@ -101,12 +102,12 @@ function apiFixtureSource(bookSourceUrl: string): LegadoBookSource {
       kind: '$.category_name',
       intro: '$.intro',
       coverUrl: '$.cover_url',
-      tocUrl: '/api/books/{{$.book_id}}/chapters',
+      tocUrl: '/api/books/{{@json:book_id}}/chapters',
     },
     ruleToc: {
-      chapterList: '$.data',
+      chapterList: '$..data[*]',
       chapterName: '$.chapter_title',
-      chapterUrl: '/api/books/{{$.book_id}}/chapters/{{$.chapter_id}}',
+      chapterUrl: '/api/books/{$.book_id}/chapters/{{@json:chapter_id}}',
     },
     ruleContent: { content: '$.data.content' },
   };
@@ -157,6 +158,17 @@ function cookieFixtureSource(bookSourceUrl: string): LegadoBookSource {
   };
 }
 
+function redirectCookieFixtureSource(bookSourceUrl: string): LegadoBookSource {
+  return {
+    ...fixtureSource(bookSourceUrl),
+    bookSourceName: '重定向 Cookie 会话测试源',
+    searchUrl: '/redirect-cookie-search?key={{key}}',
+    enabledCookieJar: true,
+    exploreUrl: undefined,
+    ruleExplore: undefined,
+  };
+}
+
 function browserChallengeFixtureSource(bookSourceUrl: string): LegadoBookSource {
   return {
     ...fixtureSource(bookSourceUrl),
@@ -165,6 +177,23 @@ function browserChallengeFixtureSource(bookSourceUrl: string): LegadoBookSource 
     exploreUrl: undefined,
     ruleExplore: undefined,
     startBrowserAwait: '需要浏览器完成 Cloudflare 人机验证',
+  };
+}
+
+function misassignedCoverFixtureSource(bookSourceUrl: string): LegadoBookSource {
+  const source = fixtureSource(bookSourceUrl);
+  return {
+    ...source,
+    bookSourceName: '封面误写入简介测试源',
+    ruleSearch: {
+      ...source.ruleSearch,
+      intro: 'tag.img.0@src',
+      coverUrl: undefined,
+    },
+    ruleBookInfo: {
+      ...source.ruleBookInfo,
+      intro: undefined,
+    },
   };
 }
 
@@ -190,6 +219,11 @@ beforeAll(async () => {
   const staleExploreBase = new URL('/stale-explore/', fixtureBaseUrl).toString();
   const { record: staleExploreRecord } = await registry.add(staleExploreFixtureSource(staleExploreBase));
   staleExploreSourceId = staleExploreRecord.id;
+  const misassignedCoverBase = new URL('/misassigned-cover/', fixtureBaseUrl).toString();
+  const { record: misassignedCoverRecord } = await registry.add(
+    misassignedCoverFixtureSource(misassignedCoverBase),
+  );
+  misassignedCoverSourceId = misassignedCoverRecord.id;
 
   const app = createApp(registry, 'http://app.local', '', {
     allowPrivateAddressesForTesting: true,
@@ -373,6 +407,73 @@ describe('ORSP adapter against a self-authored fixture site', () => {
     expect(body.converted).toHaveLength(1);
   });
 
+  it('keeps cookies set on redirects during an ordinary HTTP session', async () => {
+    const response = await fetch(`${appBaseUrl}/api/convert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: redirectCookieFixtureSource(new URL('/redirect-session/', fixtureBaseUrl).toString()),
+        ...conversionConsent,
+      }),
+    });
+    const body = await response.json();
+
+    expect(body.errors).toEqual([]);
+    expect(body.converted).toHaveLength(1);
+  });
+
+  it('reports mixed collection outcomes by index and source name', async () => {
+    const mixedBaseUrl = new URL('/mixed-collection/', fixtureBaseUrl).toString();
+    const valid = fixtureSource(mixedBaseUrl);
+    valid.bookSourceName = '合集成功源';
+    const invalid = { ...fixtureSource(mixedBaseUrl), bookSourceName: '合集失败源', bookSourceUrl: '不是网址' };
+    const response = await fetch(`${appBaseUrl}/api/convert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: [valid, invalid], ...conversionConsent }),
+    });
+    const body = await response.json();
+
+    expect(body.items).toHaveLength(2);
+    expect(body.items[0]).toMatchObject({ index: 0, sourceName: '合集成功源', status: 'succeeded' });
+    expect(body.items[0].result.discoveryUrl).toContain('/.well-known/open-reading-source.json');
+    expect(body.items[1]).toMatchObject({ index: 1, sourceName: '合集失败源', status: 'failed' });
+    expect(body.items[1].error).toContain('absolute HTTP(S) URL');
+    expect(body.converted).toHaveLength(1);
+    expect(body.errors).toHaveLength(1);
+  });
+
+  it('completes a successful source through the asynchronous batch API', async () => {
+    const candidate = fixtureSource(new URL('/async-batch/', fixtureBaseUrl).toString());
+    candidate.bookSourceName = '异步合集成功源';
+    const created = await fetch(`${appBaseUrl}/api/conversion-jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedTotal: 1, ...conversionConsent }),
+    });
+    const job = await created.json();
+    expect(created.status).toBe(201);
+
+    const appended = await fetch(`${appBaseUrl}/api/conversion-jobs/${job.jobId}/chunks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources: [candidate] }),
+    });
+    expect(appended.status).toBe(200);
+    expect((await appended.json()).items[0].sourceName).toBe('异步合集成功源');
+    expect((await fetch(`${appBaseUrl}/api/conversion-jobs/${job.jobId}/seal`, { method: 'POST' })).status).toBe(202);
+
+    let snapshot: any;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      snapshot = await (await fetch(`${appBaseUrl}/api/conversion-jobs/${job.jobId}`)).json();
+      if (snapshot.status === 'completed') break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(snapshot.status).toBe('completed');
+    expect(snapshot.progress).toMatchObject({ succeeded: 1, failed: 0, retainedInputBytes: 0 });
+    expect(snapshot.items[0].result.discoveryUrl).toContain('/.well-known/open-reading-source.json');
+  });
+
   it('rejects browser-managed Cookie sources before publishing them', async () => {
     const response = await fetch(`${appBaseUrl}/api/convert`, {
       method: 'POST',
@@ -404,6 +505,48 @@ describe('ORSP adapter against a self-authored fixture site', () => {
       new RegExp(`^http://app\\.local/s/${sourceId}/api/v1/assets/covers/c-`),
     );
     expect(first.coverUrl).not.toContain(new URL(fixtureBaseUrl).host);
+  });
+
+  it('repairs a list cover stored in intro across search, discover, browse, and detail', async () => {
+    const searchResponse = await fetch(
+      `${appBaseUrl}/s/${misassignedCoverSourceId}/api/v1/search?q=遨游`,
+    );
+    const search = await searchResponse.json();
+    expect(searchResponse.status).toBe(200);
+    expect(search.items[0].description).toBe('');
+    expect(search.items[0].coverUrl).toMatch(
+      new RegExp(`^http://app\\.local/s/${misassignedCoverSourceId}/api/v1/assets/covers/c-`),
+    );
+
+    const discover = await (
+      await fetch(`${appBaseUrl}/s/${misassignedCoverSourceId}/api/v1/discover`)
+    ).json();
+    const discoveredBook = discover.sections[0].items[0];
+
+    const categories = await (
+      await fetch(`${appBaseUrl}/s/${misassignedCoverSourceId}/api/v1/categories`)
+    ).json();
+    const browse = await (
+      await fetch(
+        `${appBaseUrl}/s/${misassignedCoverSourceId}/api/v1/browse?category=${encodeURIComponent(categories.items[0].id)}`,
+      )
+    ).json();
+    const browsedBook = browse.items[0];
+
+    const detailResponse = await fetch(
+      `${appBaseUrl}/s/${misassignedCoverSourceId}/api/v1/books/${search.items[0].id}`,
+    );
+    const detail = await detailResponse.json();
+    expect(detailResponse.status).toBe(200);
+
+    for (const item of [discoveredBook, browsedBook, detail]) {
+      expect(item.description).toBe(search.items[0].description);
+      expect(item.coverUrl).toBe(search.items[0].coverUrl);
+    }
+
+    const coverResponse = await fetch(search.items[0].coverUrl.replace('http://app.local', appBaseUrl));
+    expect(coverResponse.status).toBe(200);
+    expect(coverResponse.headers.get('content-type')).toMatch(/^image\//);
   });
 
   it('a second search page is empty since the fixture has no {{page}} support', async () => {
@@ -660,7 +803,7 @@ describe('ORSP adapter against a self-authored fixture site', () => {
     expect(searchRes.status).toBe(200);
     expect(search.items).toHaveLength(1);
     expect(search.items[0].title).toBe('接口之书');
-    expect(search.items[0].categories).toEqual(['科幻']);
+    expect(search.items[0].categories).toEqual(['科幻', '完结']);
     expect(search.items[0].coverUrl).toMatch(
       new RegExp(`^http://app\\.local/s/${apiSourceId}/api/v1/assets/covers/c-`),
     );

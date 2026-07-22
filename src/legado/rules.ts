@@ -4,6 +4,13 @@ import { fetchPage, parseLegadoHeaders } from './fetchSource.js';
 import { cookieScopeKey, jarForSource } from './cookieJar.js';
 import { cleanSourceBaseUrl, parseSearchUrl } from './searchUrl.js';
 import type { LegadoBookSource } from './types.js';
+import {
+  canUseZhulangCodec,
+  getZhulangBookInfo,
+  getZhulangChapterContent,
+  getZhulangChapterList,
+  searchZhulangBooks,
+} from './zhulangSource.js';
 
 const MAX_PAGINATION_HOPS = 40;
 const MAX_CHAPTERS = 30_000;
@@ -78,6 +85,7 @@ export async function searchBooks(
   page: number,
   ctx?: RuleContext,
 ): Promise<SearchResultItem[]> {
+  if (canUseZhulangCodec(source)) return searchZhulangBooks(source, query, page);
   const rule = source.ruleSearch;
   if (!rule?.bookList || !source.searchUrl) return [];
   if (page > 1 && !source.searchUrl.includes('{{page}}')) return [];
@@ -183,6 +191,7 @@ function isHttpUrl(value: string): boolean {
 }
 
 export async function getBookInfo(source: LegadoBookSource, bookUrl: string, ctx?: RuleContext): Promise<BookInfo> {
+  if (canUseZhulangCodec(source)) return getZhulangBookInfo(source, bookUrl);
   const rule = source.ruleBookInfo ?? {};
   const base = fetchOpts(source, ctx);
   const { url, html } = await fetchPage(bookUrl, base);
@@ -216,6 +225,7 @@ export async function getBookInfo(source: LegadoBookSource, bookUrl: string, ctx
 }
 
 export async function getChapterList(source: LegadoBookSource, bookUrl: string, ctx?: RuleContext): Promise<TocChapter[]> {
+  if (canUseZhulangCodec(source)) return getZhulangChapterList(source, bookUrl);
   const bookInfoRule = source.ruleBookInfo ?? {};
   const tocRule = source.ruleToc ?? {};
   if (!tocRule.chapterList) return [];
@@ -267,6 +277,7 @@ export async function getChapterList(source: LegadoBookSource, bookUrl: string, 
 }
 
 export async function getChapterContent(source: LegadoBookSource, chapterUrl: string, ctx?: RuleContext): Promise<string> {
+  if (canUseZhulangCodec(source)) return getZhulangChapterContent(source, chapterUrl);
   const rule = source.ruleContent ?? {};
   const parts: string[] = [];
   const seenUrls = new Set<string>();
@@ -348,16 +359,20 @@ function parseJsonResponse(raw: string): unknown | null {
 function extractJsonValue(root: unknown, rule: string | undefined): string {
   if (!rule?.trim()) return '';
   const withoutJs = rule.split(/@js:/i, 1)[0]!.trim();
-  const value = withoutJs.includes('{{')
-    ? interpolateJsonTemplate(withoutJs, root)
-    : jsonPath(root, stripRegexSuffix(withoutJs));
-  return applyRegexSuffix(rule, value == null ? '' : Array.isArray(value) ? value.map(String).join('\n') : String(value));
+  const orBranches = splitJsonRule(withoutJs, '||');
+  for (const branch of orBranches) {
+    const values = splitJsonRule(branch, '&&')
+      .map((part) => evaluateJsonRulePart(root, part))
+      .filter((value) => value.trim());
+    if (values.length > 0) return values.join('\n');
+  }
+  return '';
 }
 
 function extractJsonList(root: unknown, rule: string | undefined): string[] {
   const value = extractJsonValue(root, rule);
   return value
-    .split(',')
+    .split(/[\n,]+/)
     .map((part) => part.trim())
     .filter(Boolean);
 }
@@ -366,11 +381,51 @@ function extractJsonUrl(root: unknown, rule: string | undefined): string {
   return extractJsonValue(root, rule).trim();
 }
 
+function evaluateJsonRulePart(root: unknown, part: string): string {
+  const normalized = stripRegexSuffix(part.trim());
+  const value = containsJsonTemplate(normalized)
+    ? interpolateJsonTemplate(normalized, root)
+    : jsonPath(root, normalized);
+  const text = value == null ? '' : Array.isArray(value) ? value.map(String).join('\n') : String(value);
+  return applyRegexSuffix(part, text);
+}
+
+function containsJsonTemplate(value: string): boolean {
+  return /\{\{\s*(?:\$|@json:)/i.test(value) || /(^|[^\{])\{\s*\$[^{}]*\}(?!\})/.test(value);
+}
+
 function interpolateJsonTemplate(template: string, root: unknown): string {
-  return template.replace(/\{\{\s*(\$[^}]*)\s*\}\}/g, (_match, path: string) => {
+  const render = (match: string, path: string): string => {
     const value = jsonPath(root, path.trim());
-    return value == null ? '' : Array.isArray(value) ? value.map(String).join(',') : String(value);
-  });
+    return value == null ? match : Array.isArray(value) ? value.map(String).join(',') : String(value);
+  };
+  return template
+    .replace(/\{\{\s*@json:([^}]+)\s*\}\}/gi, (match, path: string) => render(match, path))
+    .replace(/\{\{\s*(\$[^}]*)\s*\}\}/g, (match, path: string) => render(match, path))
+    .replace(/(^|[^\{])\{\s*(\$[^{}]*)\s*\}(?!\})/g, (match, prefix: string, path: string) => {
+      return `${prefix}${render(match.slice(prefix.length), path)}`;
+    });
+}
+
+/** Split safe JSON rule combinators without interpreting source-supplied code. */
+function splitJsonRule(rule: string, operator: '&&' | '||'): string[] {
+  const parts: string[] = [];
+  let inRegex = false;
+  let last = 0;
+  for (let i = 0; i < rule.length; i++) {
+    if (rule[i] === '#' && rule[i + 1] === '#') {
+      inRegex = !inRegex;
+      i += 1;
+      continue;
+    }
+    if (!inRegex && rule.startsWith(operator, i)) {
+      parts.push(rule.slice(last, i));
+      last = i + operator.length;
+      i += operator.length - 1;
+    }
+  }
+  parts.push(rule.slice(last));
+  return parts;
 }
 
 function extractHtmlUrl($: ReturnType<typeof parseHtml>, scope: Parameters<typeof extractValue>[1], rule: string | undefined): string {
@@ -400,54 +455,107 @@ function applyRegexSuffix(rule: string, value: string): string {
   }
 }
 
-/** Very small JSONPath: `$.a.b`, `$.a[*]`, `$.a[*].b`, `$.a.0.b`, bare `name` relative. */
+type JsonPathStep =
+  | { kind: 'key'; value: string }
+  | { kind: 'index'; value: number }
+  | { kind: 'wildcard' }
+  | { kind: 'recursive'; value: string };
+
+/**
+ * Safe JSONPath subset for API sources. Supports direct keys, numeric indexes,
+ * wildcards, quoted bracket keys, and recursive descent such as `$..list[*]`.
+ * It intentionally excludes filters, expressions, functions, and scripts.
+ */
 function jsonPath(root: unknown, path: string): unknown {
   if (!path) return undefined;
-  let p = path.trim();
-  if (p.startsWith('$.')) p = p.slice(2);
-  else if (p === '$') return root;
-  else if (p.startsWith('$')) p = p.slice(1);
+  const trimmed = path.trim();
+  if (trimmed === '$') return root;
+  const steps = parseJsonPath(trimmed);
+  if (!steps) return undefined;
 
-  // Relative field name without $ (common inside list items).
-  if (!p.includes('.') && !p.includes('[')) {
-    if (root && typeof root === 'object' && !Array.isArray(root)) {
-      return (root as Record<string, unknown>)[p];
-    }
+  let values: unknown[] = [root];
+  for (const step of steps) {
+    values = values.flatMap((value) => applyJsonPathStep(value, step));
+    if (values.length === 0) return undefined;
   }
+  const lastStep = steps.at(-1);
+  const expanded = lastStep?.kind === 'wildcard' || lastStep?.kind === 'recursive';
+  if (values.length === 1 && (!expanded || Array.isArray(values[0]))) return values[0];
+  return values;
+}
 
-  let cur: unknown = root;
-  const tokens = p.split('.').filter(Boolean);
-  for (const token of tokens) {
-    if (cur == null) return undefined;
-    const m = token.match(/^(\w+)?(?:\[(\*|\d+)\])?$/);
-    if (!m) {
-      // fallback: plain key
-      if (typeof cur === 'object' && cur !== null && token in (cur as object)) {
-        cur = (cur as Record<string, unknown>)[token];
-        continue;
+function parseJsonPath(path: string): JsonPathStep[] | null {
+  let source = path.startsWith('$') ? path.slice(1) : path;
+  const steps: JsonPathStep[] = [];
+  let index = 0;
+
+  while (index < source.length) {
+    if (source.startsWith('..', index)) {
+      index += 2;
+      const token = readJsonPathToken(source, index);
+      if (!token || token.kind === 'index') return null;
+      steps.push({ kind: 'recursive', value: token.kind === 'wildcard' ? '*' : token.value });
+      index = token.next;
+      continue;
+    }
+    if (source[index] === '.') index += 1;
+    if (index >= source.length) break;
+
+    if (source[index] === '[') {
+      const closing = source.indexOf(']', index + 1);
+      if (closing === -1) return null;
+      const raw = source.slice(index + 1, closing).trim();
+      if (raw === '*') steps.push({ kind: 'wildcard' });
+      else if (/^\d+$/.test(raw)) steps.push({ kind: 'index', value: Number(raw) });
+      else {
+        const quoted = raw.match(/^(['"])(.*)\1$/);
+        if (!quoted) return null;
+        steps.push({ kind: 'key', value: quoted[2] });
       }
-      return undefined;
+      index = closing + 1;
+      continue;
     }
-    const key = m[1];
-    const index = m[2];
-    if (key) {
-      if (typeof cur !== 'object' || cur === null) return undefined;
-      cur = (cur as Record<string, unknown>)[key];
-    }
-    if (index === '*') {
-      // Expand array; remaining path applied later via flatten — only valid as last list step.
-      if (!Array.isArray(cur)) return undefined;
-      // If more tokens remain, map them over elements (handled by recursive join).
-      const rest = tokens.slice(tokens.indexOf(token) + 1).join('.');
-      if (!rest) return cur;
-      return cur.map((el) => jsonPath(el, rest.startsWith('$') ? rest : `$.${rest}`));
-    }
-    if (index !== undefined) {
-      if (!Array.isArray(cur)) return undefined;
-      cur = cur[Number(index)];
-    }
+
+    const token = readJsonPathToken(source, index);
+    if (!token) return null;
+    if (token.kind === 'wildcard') steps.push({ kind: 'wildcard' });
+    else if (token.kind === 'index') steps.push({ kind: 'index', value: Number(token.value) });
+    else steps.push({ kind: 'key', value: token.value });
+    index = token.next;
   }
-  return cur;
+  return steps;
+}
+
+function readJsonPathToken(
+  source: string,
+  start: number,
+): { kind: 'key' | 'index' | 'wildcard'; value: string; next: number } | null {
+  if (source[start] === '*') return { kind: 'wildcard', value: '*', next: start + 1 };
+  let end = start;
+  while (end < source.length && source[end] !== '.' && source[end] !== '[') end += 1;
+  const value = source.slice(start, end).trim();
+  if (!value || !/^[\w-]+$/.test(value)) return null;
+  return { kind: /^\d+$/.test(value) ? 'index' : 'key', value, next: end };
+}
+
+function applyJsonPathStep(value: unknown, step: JsonPathStep): unknown[] {
+  if (step.kind === 'recursive') return recursiveJsonValues(value, step.value);
+  if (step.kind === 'wildcard') {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>);
+    return [];
+  }
+  if (step.kind === 'index') return Array.isArray(value) && step.value < value.length ? [value[step.value]] : [];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return step.value in value ? [(value as Record<string, unknown>)[step.value]] : [];
+}
+
+function recursiveJsonValues(value: unknown, key: string): unknown[] {
+  if (Array.isArray(value)) return value.flatMap((item) => recursiveJsonValues(item, key));
+  if (!value || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  const matches = key === '*' ? Object.values(record) : key in record ? [record[key]] : [];
+  return [...matches, ...Object.values(record).flatMap((item) => recursiveJsonValues(item, key))];
 }
 
 function applyReplaceRegex(value: string, rule: string): string {

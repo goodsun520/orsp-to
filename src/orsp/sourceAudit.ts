@@ -26,7 +26,7 @@ export interface SourceAuditFailed {
 
 export type SourceAuditOutcome = SourceAuditPassed | SourceAuditFailed;
 
-const fallbackQueries = ['西游记', '斗破苍穹', '凡人修仙传', '重生', '总裁'];
+const fallbackQueries = ['重生', '总裁', '西游记', '斗破苍穹', '凡人修仙传'];
 
 /** Audits a candidate through the same runtime contract used by public routes. */
 export async function auditLegadoSource(
@@ -76,8 +76,8 @@ export async function auditLegadoSource(
 
   const queries = uniqueQueries([
     ...(options.queries ?? []),
-    ...(discoveredQuery ? [discoveredQuery] : []),
     ...fallbackQueries,
+    ...(discoveredQuery ? [discoveredQuery] : []),
   ]);
   for (const query of queries) {
     const searchStarted = Date.now();

@@ -3,6 +3,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { detectUnsupportedFeatures, type LegadoBookSource, type UnsupportedFeatures } from '../legado/types.js';
 import { cleanSourceBaseUrl } from '../legado/searchUrl.js';
+import { isAllowedZhulangCoverUrl } from '../legado/zhulangCodec.js';
 import { decodeId, encodeId, isValidOpaqueId } from './ids.js';
 
 function cleanUrlKey(url: string): string {
@@ -217,7 +218,10 @@ export class SourceRegistry {
     } catch {
       return null;
     }
-    if (!['http:', 'https:'].includes(cover.protocol) || cover.origin !== source.origin) return null;
+    if (
+      !['http:', 'https:'].includes(cover.protocol) ||
+      (cover.origin !== source.origin && !isAllowedZhulangCoverUrl(record.legado, cover))
+    ) return null;
 
     const id = `c-${createHash('sha256').update(cover.toString()).digest('base64url')}`;
     record.coverAssets ??= {};
