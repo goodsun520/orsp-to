@@ -287,6 +287,7 @@ function selectCss($: CheerioAPI, scope: Node[], css: string): Node[] {
 }
 
 function looksLikeDescendantCss(value: string): boolean {
+  if (/^(?:tag|id|class|text)\./.test(value)) return false;
   return /\s|>|\+|~/.test(value);
 }
 

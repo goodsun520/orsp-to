@@ -210,17 +210,84 @@ export async function getBookInfo(source: LegadoBookSource, bookUrl: string, ctx
   }
   const $ = parseHtml(html);
   const scope = [$.root().get(0)!];
+  const variables = extractBookInfoVariables($, scope, rule.init);
+  const extract = (value: string | undefined) => extractBookInfoValue($, scope, value, variables);
   return normalizeBookFields({
-    title: extractValue($, scope, rule.name),
-    author: extractValue($, scope, rule.author),
-    kind: extractList($, scope, rule.kind),
-    wordCount: extractValue($, scope, rule.wordCount),
-    lastChapter: extractValue($, scope, rule.lastChapter),
-    intro: extractValue($, scope, rule.intro),
-    coverUrl: extractValue($, scope, rule.coverUrl),
+    title: firstValue(
+      extract(rule.name),
+      extractValue($, scope, '@css:meta[property="og:novel:book_name"]@content'),
+      extractValue($, scope, '@css:meta[property="og:title"]@content'),
+      extractValue($, scope, 'tag.h1.0@text'),
+    ),
+    author: firstValue(
+      extract(rule.author),
+      extractValue($, scope, '@css:meta[property="og:novel:author"]@content'),
+      extractValue($, scope, '@css:meta[name="author"]@content'),
+    ),
+    kind: extractBookInfoList($, scope, rule.kind, variables),
+    wordCount: extract(rule.wordCount),
+    lastChapter: extract(rule.lastChapter),
+    intro: firstValue(
+      extract(rule.intro),
+      extractValue($, scope, '@css:meta[property="og:description"]@content'),
+      extractValue($, scope, '@css:meta[name="description"]@content'),
+    ),
+    coverUrl: firstValue(
+      extract(rule.coverUrl),
+      extractValue($, scope, '@css:meta[property="og:image"]@content'),
+    ),
     bookUrl: url,
     tocUrl: absolutize(extractHtmlUrl($, scope, rule.tocUrl), url),
   }, url);
+}
+
+function extractBookInfoVariables(
+  $: ReturnType<typeof parseHtml>,
+  scope: Parameters<typeof extractValue>[1],
+  init: string | undefined,
+): Map<string, string> {
+  const variables = new Map<string, string>();
+  const body = init?.trim().match(/^@put:\{([\s\S]*)\}$/i)?.[1];
+  if (!body) return variables;
+  const pair = /([A-Za-z_]\w*)\s*:\s*"((?:\\.|[^"\\])*)"/g;
+  for (const match of body.matchAll(pair)) {
+    let selector = match[2];
+    try {
+      selector = JSON.parse(`"${selector}"`) as string;
+    } catch {
+      // Keep the literal selector if the source used non-JSON escaping.
+    }
+    variables.set(match[1], extractValue($, scope, selector));
+  }
+  return variables;
+}
+
+function extractBookInfoValue(
+  $: ReturnType<typeof parseHtml>,
+  scope: Parameters<typeof extractValue>[1],
+  rule: string | undefined,
+  variables: Map<string, string>,
+): string {
+  const key = rule?.trim().match(/^@get:\{([A-Za-z_]\w*)\}$/i)?.[1];
+  return key ? variables.get(key) ?? '' : extractValue($, scope, rule);
+}
+
+function extractBookInfoList(
+  $: ReturnType<typeof parseHtml>,
+  scope: Parameters<typeof extractValue>[1],
+  rule: string | undefined,
+  variables: Map<string, string>,
+): string[] {
+  const key = rule?.trim().match(/^@get:\{([A-Za-z_]\w*)\}$/i)?.[1];
+  if (!key) return extractList($, scope, rule);
+  return (variables.get(key) ?? '')
+    .split(/[\n,]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function firstValue(...values: string[]): string {
+  return values.find((value) => value.trim()) ?? '';
 }
 
 /**

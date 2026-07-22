@@ -11,6 +11,11 @@ describe('parseSearchUrl', () => {
     expect(p.path).toBe('/tag/?key=%E4%B9%A6%E7%94%9F&page=2');
   });
 
+  it('supports safe page arithmetic in URL templates', () => {
+    const p = parseSearchUrl('/search-{{key}}-{{page-1}}.html', { key: '书生', page: 2 });
+    expect(p.path).toBe('/search-%E4%B9%A6%E7%94%9F-1.html');
+  });
+
   it('parses POST body + charset + method with single-quoted options', () => {
     const p = parseSearchUrl(
       "/modules/article/search.php,{'charset':'gbk','body':'searchkey={{key}}','method':'POST'}",
@@ -52,6 +57,19 @@ describe('parseSearchUrl', () => {
     const o = parseLegadoJsonObject("{'method':'POST','body':'s={{key}}'}");
     expect(o?.method).toBe('POST');
     expect(o?.body).toBe('s={{key}}');
+  });
+
+  it('parses string-encoded headers and a duplicated opening brace', () => {
+    const p = parseSearchUrl(
+      '/search,{{"charset":"gbk"}',
+      { key: 'x' },
+    );
+    expect(p.charset).toBe('gbk');
+    const withHeaders = parseSearchUrl(
+      "/search,{'headers':\"{'User-Agent':'mobile'}\"}",
+      { key: 'x' },
+    );
+    expect(withHeaders.headers['User-Agent']).toBe('mobile');
   });
 });
 

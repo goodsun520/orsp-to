@@ -83,8 +83,11 @@ export function parseSearchUrl(searchUrl: string, vars: Record<string, string | 
         body = applyTemplate(rawOptions.body, vars, /*encodePath*/ false);
       }
       if (typeof rawOptions.charset === 'string') charset = rawOptions.charset;
-      if (rawOptions.headers && typeof rawOptions.headers === 'object') {
-        for (const [k, v] of Object.entries(rawOptions.headers as Record<string, unknown>)) {
+      const optionHeaders = typeof rawOptions.headers === 'string'
+        ? parseLegadoJsonObject(rawOptions.headers)
+        : rawOptions.headers;
+      if (optionHeaders && typeof optionHeaders === 'object') {
+        for (const [k, v] of Object.entries(optionHeaders as Record<string, unknown>)) {
           headers[k] = String(v);
         }
       }
@@ -148,7 +151,8 @@ function splitUrlAndOptions(raw: string): { urlPart: string; optionsPart?: strin
  * we only need the common `{'method':'POST','body':'...'}` form.
  */
 export function parseLegadoJsonObject(raw: string): Record<string, unknown> | undefined {
-  const s = raw.trim();
+  let s = raw.trim();
+  if (s.startsWith('{{') && !s.endsWith('}}')) s = s.slice(1);
   if (!s.startsWith('{')) return undefined;
   // Replace single-quoted strings with double-quoted, escaping interior doubles.
   try {
@@ -176,10 +180,15 @@ export function applyTemplate(
   vars: Record<string, string | number>,
   encodePath: boolean,
 ): string {
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, name: string) => {
+  return template.replace(
+    /\{\{\s*(\w+)(?:\s*([+-])\s*(\d+))?\s*\}\}/g,
+    (_, name: string, operator: string | undefined, rawOffset: string | undefined) => {
     const value = vars[name];
     if (value === undefined) return '';
-    const str = String(value);
+    const offset = rawOffset === undefined ? 0 : Number(rawOffset) * (operator === '-' ? -1 : 1);
+    const adjusted = offset === 0 ? value : Number(value) + offset;
+    const str = String(adjusted);
     return encodePath ? encodeURIComponent(str) : str;
-  });
+    },
+  );
 }
