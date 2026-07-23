@@ -15,4 +15,16 @@
     "sourceMap": true
   },
   "include": ["src"]
+  {
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": ["src/**/*"]
+}
+
 }
